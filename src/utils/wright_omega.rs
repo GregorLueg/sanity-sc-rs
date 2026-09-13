@@ -20,12 +20,14 @@
 // Consts //
 ////////////
 
-/// Convergence tolerance on `t`, absolute.
+/// Convergence tolerance on the residual `exp(t) + t - x`.
 ///
-/// `g(t) = exp(t) + t - x` has `g' >= 1` everywhere, so the residual bounds the
-/// error in `t` directly and no relative test is needed. Set to a few ulp of
-/// the largest `t` this crate produces, which is
-/// `ln(ln(sum of all UMI counts))`, comfortably below 100.
+/// Applied relative to `1 + exp(t)`. `g' >= 1` everywhere so the residual
+/// bounds the error in `t` directly, but `g` is evaluated as a sum containing
+/// `exp(t)`, whose own ulp exceeds an absolute `1e-14` once `omega > 90`. An
+/// absolute test there is unreachable and costs the full iteration cap.
+/// Measured 2026-09-13: absolute, `x = 100`, `1e3` and `1e5` all took 8
+/// iterations; relative, 3.
 const OMEGA_TOL: f64 = 1e-14;
 
 /// Iteration cap for the Halley solve.
@@ -69,7 +71,7 @@ pub(crate) fn log_omega(x: f64) -> f64 {
     for _ in 0..OMEGA_MAX_ITER {
         let e = t.exp();
         let g = e + t - x;
-        if g.abs() < OMEGA_TOL {
+        if g.abs() < OMEGA_TOL * (1.0 + e) {
             break;
         }
         // Halley: t -= 2 g g' / (2 g'^2 - g g''), with g' = e + 1 and g'' = e.
@@ -177,3 +179,4 @@ mod tests {
         assert_relative_eq!(t, -700.0, max_relative = 1e-12);
     }
 }
+
