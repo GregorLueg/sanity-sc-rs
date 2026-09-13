@@ -112,7 +112,9 @@ pub enum SanityErrors {
         residual: f64,
     },
 
-    #[error("Variance bin {bin} produced a log marginal likelihood of {value:e}, which is not finite.")]
+    #[error(
+        "Variance bin {bin} produced a log marginal likelihood of {value:e}, which is not finite."
+    )]
     /// The Laplace approximation returned a value the softmax cannot normalise.
     NonFiniteBinLikelihood {
         /// The offending bin.

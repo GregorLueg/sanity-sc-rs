@@ -179,4 +179,3 @@ mod tests {
         assert_relative_eq!(t, -700.0, max_relative = 1e-12);
     }
 }
-
