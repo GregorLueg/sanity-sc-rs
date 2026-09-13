@@ -62,12 +62,72 @@ const OMEGA_LARGE_X: f64 = 1.0;
 /// `ln omega(x)`.
 #[inline]
 pub(crate) fn log_omega(x: f64) -> f64 {
-    let mut t = if x > OMEGA_LARGE_X {
+    let t = if x > OMEGA_LARGE_X {
         (x - x.ln()).ln()
     } else {
         x
     };
+    refine(x, t)
+}
 
+/// Solve `exp(t) + t = x` starting from the solution at a nearby argument.
+///
+/// The caller holds `t_prev = ln omega(x_prev)` and `omega_prev`. Since
+/// `dt / dx = 1 / (1 + omega)`, one first-order step lands within `O(dx^2)` of
+/// the root, and Halley is cubic from there. This replaces the cold guess's
+/// `ln` with a divide and, when `dx` is small, cuts the iteration count.
+///
+/// Measured 2026-09-13 on an M1 Max, 40 simulated genes over 1000 cells at 161
+/// bins, counting loop entries. Under `Marginalise` the cold entry point
+/// averaged 2.79 per call; routing the sweeps through here brings it to 1.92,
+/// and drops the cold guess's `ln` with it. `VarianceRule::Fixed` is one cold
+/// solve per gene and still sits at 2.33.
+///
+/// ### Params
+///
+/// * `x` - The argument of the Wright omega function.
+/// * `dx` - `x - x_prev`.
+/// * `t_prev` - `ln omega(x_prev)`.
+/// * `omega_prev` - `omega(x_prev)`.
+///
+/// ### Returns
+///
+/// `ln omega(x)`. Falls back to the cold guess if the prediction is not finite,
+/// which a caller passing a stale or non-finite previous state can provoke.
+#[inline]
+pub(crate) fn log_omega_near(x: f64, dx: f64, t_prev: f64, omega_prev: f64) -> f64 {
+    let t = t_prev + dx / (1.0 + omega_prev);
+    if t.is_finite() {
+        refine(x, t)
+    } else {
+        log_omega(x)
+    }
+}
+
+/// Halley iteration on `g(t) = exp(t) + t - x` from a starting point.
+///
+/// Halley is only conditionally convergent here. Its denominator
+/// `2 g'^2 - g g''` is `e (e - t + x)` to leading order and turns negative once
+/// the iterate sits far enough above the root, which reverses the step and
+/// throws the iterate further out. Newton on the same `g` has no such failure:
+/// `g` is increasing and convex, so a Newton step from anywhere lands at or
+/// above the root and converges monotonically from there. Take Newton whenever
+/// Halley's denominator is not positive, and Halley otherwise for the cubic
+/// rate near the root.
+///
+/// A cold start never reaches the bad region, which is why this only surfaced
+/// once [`log_omega_near`] began starting the iteration from a predicted point.
+///
+/// ### Params
+///
+/// * `x` - The argument of the Wright omega function.
+/// * `t` - Starting point for `ln omega(x)`.
+///
+/// ### Returns
+///
+/// `ln omega(x)`.
+#[inline(always)]
+fn refine(x: f64, mut t: f64) -> f64 {
     for _ in 0..OMEGA_MAX_ITER {
         let e = t.exp();
         let g = e + t - x;
@@ -76,7 +136,12 @@ pub(crate) fn log_omega(x: f64) -> f64 {
         }
         // Halley: t -= 2 g g' / (2 g'^2 - g g''), with g' = e + 1 and g'' = e.
         let d1 = e + 1.0;
-        t -= 2.0 * g * d1 / (2.0 * d1 * d1 - g * e);
+        let halley = 2.0 * d1 * d1 - g * e;
+        t -= if halley > 0.0 {
+            2.0 * g * d1 / halley
+        } else {
+            g / d1
+        };
     }
 
     t

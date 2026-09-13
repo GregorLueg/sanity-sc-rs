@@ -8,13 +8,44 @@
 //! `O(B)` state, and the second pass re-derives the per-cell quantities at a
 //! known offset with a single sweep and no iteration. Scratch is `O(B + C)`.
 //! The point-estimate rules skip the second pass entirely.
+//!
+//! Running the second pass cell block outermost instead, so that a block stays
+//! in L1 across the whole grid, was measured on 2026-09-13 and was 10% slower:
+//! the pass is bound by the transcendentals in the Wright omega and error bar
+//! solves, not by memory traffic, so the tiling bought nothing and the extra
+//! indexing cost.
 
-use super::fractions::{Stationary, refresh, solve_stationary};
-use super::likelihood::{Laplace, laplace};
+use super::fractions::{Stationary, SweepState, refresh, solve_stationary};
+use super::likelihood::laplace;
 use super::variance::cell_variance;
 use crate::config::{SanityParams, VarianceGrid, VarianceRule};
 use crate::errors::SanityErrors;
 use crate::utils::polygamma::{digamma, trigamma};
+
+////////////
+// Consts //
+////////////
+
+/// Posterior weight below which a bin is dropped from the second pass.
+///
+/// SI eq. 39 and 42 both weight a bin's contribution by `W_b`, so a bin under
+/// this contributes less than this fraction of either estimate, against error
+/// bars the method reports at the first or second digit. Every surviving bin
+/// costs a full sweep over the cells plus an error bar solve in each of them,
+/// which is the whole cost of the rule.
+///
+/// Measured 2026-09-13 on an M1 Max, 161 bins. On 400 simulated genes over
+/// 4000 cells at 7.5% density the rule takes 6.78 s with nothing dropped,
+/// 5.19 s at `1e-14`, 5.00 s here and 4.59 s at `1e-6`. Worst drift in the log
+/// fold change, in units of the error bar the method reports for it, measured
+/// on 200 genes over 2000 cells against an unpruned run: `4e-10` error bars at
+/// `1e-12`, `1e-8` here, `1e-4` at `1e-6`. Almost all of the saving is already
+/// had at `1e-14`, so this sits well inside the flat part of the curve.
+///
+/// Must stay strictly positive. It is also what stops the leading run of
+/// underflowed bins from reaching the Welford update, where the first one would
+/// divide a zero weight by a zero running sum.
+const MARGINALISE_MIN_WEIGHT: f64 = 1e-10;
 
 /////////////////
 // GeneScratch //
@@ -45,6 +76,11 @@ pub(crate) struct GeneScratch {
     curvature: Vec<f64>,
     /// Posterior weights `W_b`, length `n_bins`.
     weights: Vec<f64>,
+    /// What `omega` and `log_omega` currently hold, for warm starting.
+    ///
+    /// Cleared at the start of every gene: the arrays survive across genes but
+    /// their contents belong to the gene that wrote them.
+    state: SweepState,
 }
 
 impl GeneScratch {
@@ -70,6 +106,7 @@ impl GeneScratch {
             offsets: vec![0.0; n_bins],
             curvature: vec![0.0; n_bins],
             weights: vec![0.0; n_bins],
+            state: None,
         }
     }
 }
@@ -114,6 +151,7 @@ fn sweep_grid(
             &scratch.counts,
             log_totals,
             guess,
+            &mut scratch.state,
             &mut scratch.omega,
             &mut scratch.log_omega,
         )?;
@@ -126,7 +164,7 @@ fn sweep_grid(
         );
         scratch.log_lik[b] = fit.log_marginal;
         scratch.offsets[b] = point.z;
-        scratch.curvature[b] = fit.curvature_sum;
+        scratch.curvature[b] = point.curvature_sum;
         guess = point.z;
     }
     Ok(())
@@ -194,18 +232,33 @@ fn marginalise(
     out_error: &mut [f64],
     n_cells: usize,
 ) -> GeneSummary {
-    scratch.mean_d[..n_cells].fill(0.0);
-    scratch.m2_d[..n_cells].fill(0.0);
-    scratch.mean_var[..n_cells].fill(0.0);
-
+    // The gene-level scalars do not touch the cells, so they come out of the
+    // tiled loop entirely and are accumulated once over the grid.
     let mut weight_sum = 0.0;
     let mut mean_offset = 0.0;
     let mut m2_offset = 0.0;
     let mut mean_variance = 0.0;
-
     for (b, &v) in grid.values.iter().enumerate() {
         let weight = scratch.weights[b];
-        if weight == 0.0 {
+        if weight < MARGINALISE_MIN_WEIGHT {
+            continue;
+        }
+        weight_sum += weight;
+        let share = weight / weight_sum;
+        let delta = scratch.offsets[b] - mean_offset;
+        mean_offset += share * delta;
+        m2_offset += weight * delta * (scratch.offsets[b] - mean_offset);
+        mean_variance += share * (v - mean_variance);
+    }
+
+    scratch.mean_d[..n_cells].fill(0.0);
+    scratch.m2_d[..n_cells].fill(0.0);
+    scratch.mean_var[..n_cells].fill(0.0);
+
+    let mut running = 0.0;
+    for (b, &v) in grid.values.iter().enumerate() {
+        let weight = scratch.weights[b];
+        if weight < MARGINALISE_MIN_WEIGHT {
             continue;
         }
         let point = Stationary {
@@ -213,39 +266,30 @@ fn marginalise(
             s,
             log_vs: (v * s).ln(),
             z: scratch.offsets[b],
+            curvature_sum: scratch.curvature[b],
         };
         refresh(
             &point,
             &scratch.counts,
             log_totals,
+            &mut scratch.state,
             &mut scratch.omega,
             &mut scratch.log_omega,
         );
 
-        weight_sum += weight;
-        let share = weight / weight_sum;
+        running += weight;
+        let share = weight / running;
 
         #[allow(clippy::needless_range_loop)]
         for c in 0..n_cells {
             let d = point.log_fold_change(scratch.log_omega[c], log_totals[c]);
-            let var = cell_variance(
-                &point,
-                scratch.counts[c],
-                d,
-                scratch.omega[c],
-                scratch.curvature[b],
-            );
+            let var = cell_variance(&point, scratch.counts[c], d, scratch.omega[c]);
 
             let delta = d - scratch.mean_d[c];
             scratch.mean_d[c] += share * delta;
             scratch.m2_d[c] += weight * delta * (d - scratch.mean_d[c]);
             scratch.mean_var[c] += share * (var - scratch.mean_var[c]);
         }
-
-        let delta = scratch.offsets[b] - mean_offset;
-        mean_offset += share * delta;
-        m2_offset += weight * delta * (scratch.offsets[b] - mean_offset);
-        mean_variance += share * (v - mean_variance);
     }
 
     for c in 0..n_cells {
@@ -329,19 +373,12 @@ fn collapse(
         &scratch.counts,
         log_totals,
         guess,
+        &mut scratch.state,
         &mut scratch.omega,
         &mut scratch.log_omega,
     )?;
-    let fit = laplace(
-        &point,
-        &scratch.counts,
-        log_totals,
-        &scratch.omega,
-        &scratch.log_omega,
-    );
     write_point_estimate(
         &point,
-        &fit,
         &scratch.counts,
         log_totals,
         &scratch.omega,
@@ -366,7 +403,6 @@ fn collapse(
 /// ### Params
 ///
 /// * `point` - The stationary point.
-/// * `fit` - The Laplace reductions at that point.
 /// * `counts` - Dense UMI counts for this gene.
 /// * `log_totals` - `ln T_c` for every cell.
 /// * `omega` - `omega(x_c)` at the point.
@@ -380,7 +416,6 @@ fn collapse(
 #[allow(clippy::too_many_arguments)]
 fn write_point_estimate(
     point: &Stationary,
-    fit: &Laplace,
     counts: &[f64],
     log_totals: &[f64],
     omega: &[f64],
@@ -391,7 +426,7 @@ fn write_point_estimate(
     for c in 0..counts.len() {
         let d = point.log_fold_change(log_omega[c], log_totals[c]);
         out_fold_change[c] = d;
-        out_error[c] = cell_variance(point, counts[c], d, omega[c], fit.curvature_sum).sqrt();
+        out_error[c] = cell_variance(point, counts[c], d, omega[c]).sqrt();
     }
 }
 
@@ -446,6 +481,7 @@ pub(crate) fn run_gene(
 
     // Scatter the sparse column. Only the touched entries are cleared again at
     // the end, so this stays O(nnz) rather than O(n_cells) for the reset.
+    scratch.state = None;
     let mut total_counts = 0.0;
     for (&i, &k) in indices.iter().zip(values) {
         scratch.counts[i as usize] = k as f64;
@@ -461,19 +497,12 @@ pub(crate) fn run_gene(
                 &scratch.counts,
                 log_totals,
                 log_total_sum + 0.5 * v,
+                &mut scratch.state,
                 &mut scratch.omega,
                 &mut scratch.log_omega,
             )?;
-            let fit = laplace(
-                &point,
-                &scratch.counts,
-                log_totals,
-                &scratch.omega,
-                &scratch.log_omega,
-            );
             write_point_estimate(
                 &point,
-                &fit,
                 &scratch.counts,
                 log_totals,
                 &scratch.omega,

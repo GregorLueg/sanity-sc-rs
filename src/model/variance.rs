@@ -63,6 +63,13 @@ pub(crate) fn gaussian_variance(v: f64, omega: f64, curvature_sum: f64) -> f64 {
 /// `1/v + s w`, so the Gaussian width `sqrt(v / (1 + omega))` is the correct
 /// leading-order guess and is used to seed the bracket.
 ///
+/// Seeding from the previous bin's `sigma` instead, since the second pass walks
+/// a cell through the grid in order, was measured on 2026-09-13 and was 15%
+/// slower over the whole rule. The grid ascends, so the previous root always
+/// undershoots and the bracket loop must double at least once, overshooting to
+/// twice it; the Gaussian width is already correct to leading order at the
+/// current `v` and needs no expansion at all.
+///
 /// ### Params
 ///
 /// * `point` - The stationary point for this gene at this variance.
@@ -136,21 +143,14 @@ pub(crate) fn empty_cell_variance(point: &Stationary, d: f64, omega: f64) -> f64
 /// * `count` - The UMI count in this cell.
 /// * `d` - `d*_c`, the log fold change in this cell.
 /// * `omega` - `omega(x_c)` for this cell.
-/// * `curvature_sum` - `S_A` over all cells.
 ///
 /// ### Returns
 ///
 /// `var(d_c)` at this variance.
 #[inline]
-pub(crate) fn cell_variance(
-    point: &Stationary,
-    count: f64,
-    d: f64,
-    omega: f64,
-    curvature_sum: f64,
-) -> f64 {
+pub(crate) fn cell_variance(point: &Stationary, count: f64, d: f64, omega: f64) -> f64 {
     if count > 0.0 {
-        gaussian_variance(point.v, omega, curvature_sum)
+        gaussian_variance(point.v, omega, point.curvature_sum)
     } else {
         empty_cell_variance(point, d, omega)
     }
@@ -163,7 +163,6 @@ pub(crate) fn cell_variance(
 #[cfg(test)]
 mod tests {
     use super::super::fractions::solve_stationary;
-    use super::super::likelihood::laplace;
     use super::*;
     use approx::assert_relative_eq;
 
@@ -219,16 +218,16 @@ mod tests {
                 &counts,
                 &log_totals,
                 totals.iter().sum::<f64>().ln(),
+                &mut None,
                 &mut omega,
                 &mut log_omega,
             )
             .expect("converges");
-            let fit = laplace(&point, &counts, &log_totals, &omega, &log_omega);
 
             let expected = brute_force_diagonal(&point, &omega);
             for c in 0..counts.len() {
                 assert_relative_eq!(
-                    gaussian_variance(v, omega[c], fit.curvature_sum),
+                    gaussian_variance(v, omega[c], point.curvature_sum),
                     expected[c],
                     max_relative = 1e-9
                 );
@@ -252,6 +251,7 @@ mod tests {
                 &counts,
                 &log_totals,
                 totals.iter().sum::<f64>().ln(),
+                &mut None,
                 &mut omega,
                 &mut log_omega,
             )
@@ -287,6 +287,7 @@ mod tests {
                 &counts,
                 &log_totals,
                 totals.iter().sum::<f64>().ln(),
+                &mut None,
                 &mut omega,
                 &mut log_omega,
             )

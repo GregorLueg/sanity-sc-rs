@@ -10,7 +10,7 @@
 //! decreasing in `z` and so has a unique root.
 
 use crate::errors::SanityErrors;
-use crate::utils::wright_omega::{log_omega, omega_from_log};
+use crate::utils::wright_omega::{log_omega, log_omega_near, omega_from_log};
 
 /// Relative tolerance on the offset residual `sum_c omega_c - v s`.
 ///
@@ -48,6 +48,33 @@ const OFFSET_MAX_ITER: usize = 100;
 /// far wider than any real data can require.
 const OFFSET_MAX_BRACKET: usize = 60;
 
+/// First outward step when bracketing the offset from a warm start.
+///
+/// The Newton loop starts from whichever end of the bracket flipped the sign,
+/// so this is also how far the first Newton iterate can sit from the guess.
+/// Sweeping an ordered grid moves `z` by far less than one unit between bins,
+/// so a small first step usually flips on the first try and leaves a bracket
+/// narrow enough for Newton to close in two iterations.
+///
+/// Measured 2026-09-13 on an M1 Max, 200 simulated genes over 4000 cells at
+/// 7.5% density and 161 bins, two interleaved passes. Wall clock for
+/// `PosteriorMean`: 1.0 gives 2.65 s, 0.25 gives 1.97 s, 0.125 gives 1.85 s,
+/// 0.0625 gives 1.53 s, 0.03125 gives 1.49 s, 0.015625 gives 1.46 s. The curve
+/// is flat below 0.03125, so anything smaller only buys extra doublings when a
+/// guess turns out worse than this data makes it.
+const OFFSET_BRACKET_STEP_WARM: f64 = 0.03125;
+
+/// First outward step when bracketing the offset from a cold start.
+///
+/// A cold guess can be a unit or more from the root, and every doubling costs a
+/// full sweep over the cells, so starting as small as the warm step just buys
+/// four extra sweeps before the bracket is wide enough to contain the root.
+///
+/// Measured 2026-09-13, same machine and data: sharing the warm step's value
+/// put `VarianceRule::Fixed`, which is one cold solve per gene and nothing
+/// else, at 0.105 s against 0.051 s here.
+const OFFSET_BRACKET_STEP_COLD: f64 = 1.0;
+
 /// The stationary point of one gene at one variance.
 ///
 /// Holds only what downstream kernels need. `omega` and `log_omega` are indexed
@@ -62,6 +89,14 @@ pub(crate) struct Stationary {
     pub log_vs: f64,
     /// The normalisation offset `z`, with `exp(z) = sum_c T_c exp(d*_c)`.
     pub z: f64,
+    /// `S_A = sum_c omega_c / (1 + omega_c)` at this point.
+    ///
+    /// Carried on the point rather than recomputed because the offset solve's
+    /// Newton derivative is the same reduction:
+    /// `F'(z) = -sum_c omega_c / (1 + omega_c)`. The solve's last sweep already
+    /// accumulated it at the returned `z`, so both the Laplace fit and the
+    /// variance kernel read it from here instead of making another pass.
+    pub curvature_sum: f64,
 }
 
 impl Stationary {
@@ -99,11 +134,29 @@ impl Stationary {
     }
 }
 
+/// The two reductions one sweep over the cells produces.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Sweep {
+    /// `sum_c omega(x_c)`, which the offset solve drives to `v s`.
+    pub sum_omega: f64,
+    /// `sum_c omega_c / (1 + omega_c)`. This is `-F'(z)` for the offset solve
+    /// and `S_A` for everything downstream; one pass produces both.
+    pub curvature_sum: f64,
+}
+
+/// What argument the `omega` and `log_omega` scratch currently holds.
+///
+/// `x_c = v k_c + ln T_c + shift`, so the pair `(v, shift)` pins the whole
+/// vector and lets the next sweep compute its own `dx` per cell.
+pub(crate) type SweepState = Option<(f64, f64)>;
+
 /// Fill `omega` and `log_omega` for every cell at a given offset.
 ///
-/// `x_c = v k_c + ln T_c + ln(v s) - z`. Warm starting is deliberately not done
-/// here: `log_omega` is globally convergent and the cost is dominated by the
-/// transcendentals, not the iteration count.
+/// `x_c = v k_c + ln T_c + ln(v s) - z`. When `state` says what the scratch
+/// already holds, each cell warm starts from its own previous root through
+/// [`log_omega_near`] rather than from the cold guess. The argument moves by
+/// `dx_c = (v - v_prev) k_c + (shift - shift_prev)`, which is exact, so the
+/// only thing a stale state costs is iterations, never correctness.
 ///
 /// ### Params
 ///
@@ -112,23 +165,32 @@ impl Stationary {
 /// * `z` - The current offset.
 /// * `counts` - Dense UMI counts for this gene, length `n_cells`.
 /// * `log_totals` - `ln T_c` for every cell, length `n_cells`.
+/// * `state` - What the scratch holds; updated to this sweep on return.
 /// * `out_omega` - Output, `omega(x_c)`.
 /// * `out_log_omega` - Output, `ln omega(x_c)`.
 ///
 /// ### Returns
 ///
-/// `sum_c omega(x_c)`, which the offset solve drives to `v s`.
+/// Both reductions over the cells.
+#[allow(clippy::too_many_arguments)]
 fn evaluate(
     v: f64,
     log_vs: f64,
     z: f64,
     counts: &[f64],
     log_totals: &[f64],
+    state: &mut SweepState,
     out_omega: &mut [f64],
     out_log_omega: &mut [f64],
-) -> f64 {
+) -> Sweep {
     let shift = log_vs - z;
-    let mut total = 0.0;
+    let (v_prev, shift_prev) = state.unwrap_or((0.0, 0.0));
+    let warm = state.is_some();
+    let dv = v - v_prev;
+    let dshift = shift - shift_prev;
+
+    let mut sum_omega = 0.0;
+    let mut curvature_sum = 0.0;
 
     for (((&k, &lt), w), t) in counts
         .iter()
@@ -137,12 +199,22 @@ fn evaluate(
         .zip(out_log_omega.iter_mut())
     {
         let x = v * k + lt + shift;
-        *t = log_omega(x);
+        *t = if warm {
+            log_omega_near(x, dv * k + dshift, *t, *w)
+        } else {
+            log_omega(x)
+        };
         *w = omega_from_log(x, *t);
-        total += *w;
+        sum_omega += *w;
+        curvature_sum += *w / (1.0 + *w);
     }
 
-    total
+    *state = Some((v, shift));
+
+    Sweep {
+        sum_omega,
+        curvature_sum,
+    }
 }
 
 /// Solve the stationarity condition for one gene at one variance.
@@ -159,6 +231,7 @@ fn evaluate(
 /// * `log_totals` - `ln T_c` for every cell, length `n_cells`.
 /// * `guess` - Starting offset. Pass the previous bin's solution when sweeping
 ///   an ordered grid; otherwise `ln(sum_c T_c) + v / 2`.
+/// * `state` - What the scratch holds, threaded through [`evaluate`].
 /// * `omega` - Scratch and output, `omega(x_c)` at the solution.
 /// * `log_omega` - Scratch and output, `ln omega(x_c)` at the solution.
 ///
@@ -167,12 +240,14 @@ fn evaluate(
 /// The stationary point, or [`SanityErrors::FractionSolveDiverged`] if neither
 /// the bracket nor the Newton loop settles. A root whose bracket has collapsed
 /// to a few ulp is returned regardless of the residual.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn solve_stationary(
     v: f64,
     s: f64,
     counts: &[f64],
     log_totals: &[f64],
     guess: f64,
+    state: &mut SweepState,
     omega: &mut [f64],
     log_omega: &mut [f64],
 ) -> Result<Stationary, SanityErrors> {
@@ -180,70 +255,81 @@ pub(crate) fn solve_stationary(
     let log_vs = vs.ln();
     let tol = vs * OFFSET_TOL.max(OFFSET_SUM_ULPS * counts.len() as f64 * f64::EPSILON);
 
-    let residual = |z: f64, omega: &mut [f64], log_omega: &mut [f64]| {
-        evaluate(v, log_vs, z, counts, log_totals, omega, log_omega) - vs
-    };
+    // Every sweep leaves `omega`, `log_omega`, `f` and `fit.curvature_sum`
+    // consistent with the `z` it was given, so no point is ever evaluated
+    // twice: the bracket search hands its last sweep straight to Newton, and
+    // the returned point's curvature is the one the final sweep accumulated.
+    let mut z = guess;
+    let cold = state.is_none();
+    let mut fit = evaluate(v, log_vs, z, counts, log_totals, state, omega, log_omega);
+    let mut f = fit.sum_omega - vs;
 
     // `F` is strictly decreasing in `z`, so a positive residual means `z` is too
     // small. Expand outwards by doubling until the sign flips.
-    let mut z = guess;
-    let mut f = residual(z, omega, log_omega);
-    let (mut lo, mut hi);
-    if f > 0.0 {
-        lo = z;
-        let mut step = 1.0;
-        loop {
-            hi = lo + step;
-            if residual(hi, omega, log_omega) <= 0.0 {
-                break;
-            }
-            lo = hi;
-            step *= 2.0;
-            if step > (1u64 << OFFSET_MAX_BRACKET) as f64 {
-                return Err(SanityErrors::FractionSolveDiverged {
-                    iterations: 0,
-                    residual: f,
-                });
-            }
-        }
+    let (mut lo, mut hi) = (z, z);
+    let ascending = f > 0.0;
+    let mut step = if cold {
+        OFFSET_BRACKET_STEP_COLD
     } else {
-        hi = z;
-        let mut step = 1.0;
-        loop {
+        OFFSET_BRACKET_STEP_WARM
+    };
+    loop {
+        if ascending {
+            hi = lo + step;
+            z = hi;
+        } else {
             lo = hi - step;
-            if residual(lo, omega, log_omega) >= 0.0 {
-                break;
-            }
-            hi = lo;
-            step *= 2.0;
-            if step > (1u64 << OFFSET_MAX_BRACKET) as f64 {
-                return Err(SanityErrors::FractionSolveDiverged {
-                    iterations: 0,
-                    residual: f,
-                });
-            }
+            z = lo;
+        }
+        fit = evaluate(v, log_vs, z, counts, log_totals, state, omega, log_omega);
+        f = fit.sum_omega - vs;
+        if (ascending && f <= 0.0) || (!ascending && f >= 0.0) {
+            break;
+        }
+        if ascending {
+            lo = hi
+        } else {
+            hi = lo
+        }
+        step *= 2.0;
+        if step > (1u64 << OFFSET_MAX_BRACKET) as f64 {
+            return Err(SanityErrors::FractionSolveDiverged {
+                iterations: 0,
+                residual: f,
+            });
         }
     }
 
-    z = 0.5 * (lo + hi);
     for iteration in 0..OFFSET_MAX_ITER {
-        f = residual(z, omega, log_omega);
         if f.abs() <= tol {
-            return Ok(Stationary { v, s, log_vs, z });
+            return Ok(Stationary {
+                v,
+                s,
+                log_vs,
+                z,
+                curvature_sum: fit.curvature_sum,
+            });
         }
         if f > 0.0 {
             lo = z
         } else {
             hi = z
         }
-        // The root is converged to machine precision; the residual test below
+        // The root is converged to machine precision; the residual test above
         // its own summation noise can no longer be met.
         if hi - lo <= OFFSET_BRACKET_ULPS * f64::EPSILON * (1.0 + z.abs()) {
-            return Ok(Stationary { v, s, log_vs, z });
+            return Ok(Stationary {
+                v,
+                s,
+                log_vs,
+                z,
+                curvature_sum: fit.curvature_sum,
+            });
         }
 
-        // F'(z) = -sum_c omega_c / (1 + omega_c), from d omega / dx = omega / (1 + omega).
-        let slope: f64 = omega.iter().map(|&w| w / (1.0 + w)).sum();
+        // F'(z) = -sum_c omega_c / (1 + omega_c), which the sweep at `z`
+        // already accumulated.
+        let slope = fit.curvature_sum;
         let next = if slope > 0.0 { z + f / slope } else { f64::NAN };
 
         z = if next.is_finite() && next > lo && next < hi {
@@ -258,6 +344,9 @@ pub(crate) fn solve_stationary(
                 residual: f,
             });
         }
+
+        fit = evaluate(v, log_vs, z, counts, log_totals, state, omega, log_omega);
+        f = fit.sum_omega - vs;
     }
 
     // The loop above always returns.
@@ -275,6 +364,7 @@ pub(crate) fn solve_stationary(
 /// * `point` - The stationary point from the first pass.
 /// * `counts` - Dense UMI counts for this gene, length `n_cells`.
 /// * `log_totals` - `ln T_c` for every cell, length `n_cells`.
+/// * `state` - What the scratch holds, threaded through [`evaluate`].
 /// * `omega` - Output, `omega(x_c)`.
 /// * `log_omega` - Output, `ln omega(x_c)`.
 ///
@@ -285,6 +375,7 @@ pub(crate) fn refresh(
     point: &Stationary,
     counts: &[f64],
     log_totals: &[f64],
+    state: &mut SweepState,
     omega: &mut [f64],
     log_omega: &mut [f64],
 ) {
@@ -294,6 +385,7 @@ pub(crate) fn refresh(
         point.z,
         counts,
         log_totals,
+        state,
         omega,
         log_omega,
     );
@@ -330,6 +422,7 @@ mod tests {
             &counts,
             &log_totals,
             guess,
+            &mut None,
             &mut omega,
             &mut log_omega,
         )
@@ -354,6 +447,7 @@ mod tests {
             &counts,
             &log_totals,
             guess,
+            &mut None,
             &mut omega,
             &mut log_omega,
         )
@@ -381,6 +475,7 @@ mod tests {
             &counts,
             &log_totals,
             guess,
+            &mut None,
             &mut omega,
             &mut log_omega,
         )
@@ -408,6 +503,7 @@ mod tests {
             &counts,
             &log_totals,
             guess,
+            &mut None,
             &mut omega,
             &mut log_omega,
         )

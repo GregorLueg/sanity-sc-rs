@@ -18,25 +18,21 @@ use super::fractions::Stationary;
 /////////////
 
 /// Per-gene, per-bin reductions of the Laplace approximation.
-///
-/// Kept as a struct because the variance kernel needs `curvature_sum` too, and
-/// recomputing it would be a second pass over every cell.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Laplace {
     /// `ln P(k | v)`, up to an additive constant that is the same in every bin.
     pub log_marginal: f64,
-    /// `sum_c omega_c / (1 + omega_c)`, the cancellation-free form of the
-    /// rank-one correction scaled by `v s`.
-    pub curvature_sum: f64,
 }
 
 /// Evaluate the marginal likelihood at a stationary point.
 ///
-/// One pass over the cells accumulating four reductions at once: the quadratic
-/// prior term, the data term, the log determinant's diagonal, and the rank-one
-/// correction. Accumulation is in `f64` regardless of storage precision,
-/// because the bin-to-bin differences that select a variance are small against
-/// the sum over cells.
+/// One pass over the cells accumulating three reductions at once: the quadratic
+/// prior term, the data term and the log determinant's diagonal. The rank-one
+/// correction is not among them; the offset solve's Newton derivative is the
+/// same sum, so it arrives on the point as `Stationary::curvature_sum` rather
+/// than being accumulated again here. Accumulation is in `f64` regardless of
+/// storage precision, because the bin-to-bin differences that select a variance
+/// are small against the sum over cells.
 ///
 /// ### Params
 ///
@@ -48,7 +44,7 @@ pub(crate) struct Laplace {
 ///
 /// ### Returns
 ///
-/// The log marginal likelihood and the rank-one reduction.
+/// The log marginal likelihood.
 pub(crate) fn laplace(
     point: &Stationary,
     counts: &[f64],
@@ -58,18 +54,17 @@ pub(crate) fn laplace(
 ) -> Laplace {
     let n_cells = counts.len() as f64;
     let v = point.v;
+    let curvature_sum = point.curvature_sum;
 
     let mut sum_sq = 0.0;
     let mut sum_data = 0.0;
     let mut sum_log_diag = 0.0;
-    let mut curvature_sum = 0.0;
 
     for (((&k, &lt), &w), &t) in counts.iter().zip(log_totals).zip(omega).zip(log_omega) {
         let d = point.log_fold_change(t, lt);
         sum_sq += d * d;
         sum_data += k * d;
         sum_log_diag += w.ln_1p();
-        curvature_sum += w / (1.0 + w);
     }
 
     // SI eq. 20 at the optimum, using sum_c T_c exp(d*_c) = exp(z).
@@ -81,7 +76,6 @@ pub(crate) fn laplace(
 
     Laplace {
         log_marginal: log_star - 0.5 * log_det,
-        curvature_sum,
     }
 }
 
@@ -143,17 +137,18 @@ mod tests {
                 &counts,
                 &log_totals,
                 totals.iter().sum::<f64>().ln(),
+                &mut None,
                 &mut omega,
                 &mut log_omega,
             )
             .expect("converges");
 
-            let fast = laplace(&point, &counts, &log_totals, &omega, &log_omega);
+            let _ = laplace(&point, &counts, &log_totals, &omega, &log_omega);
             let mut sum_log_diag = 0.0;
             for &w in &omega {
                 sum_log_diag += w.ln_1p();
             }
-            let log_det = fast.curvature_sum.ln() - point.log_vs + sum_log_diag - n * v.ln();
+            let log_det = point.curvature_sum.ln() - point.log_vs + sum_log_diag - n * v.ln();
 
             assert_relative_eq!(
                 log_det,
@@ -180,6 +175,7 @@ mod tests {
             &counts,
             &log_totals,
             totals.iter().sum::<f64>().ln(),
+            &mut None,
             &mut omega,
             &mut log_omega,
         )
