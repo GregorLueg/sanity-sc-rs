@@ -1,8 +1,7 @@
 //! The stationary point of the log posterior at a fixed variance.
 //!
-//! SPEC section 2, SI eq. 21-28. Everything here is per gene and dense in the
-//! cell axis: a cell with no counts for this gene still contributes through its
-//! library size.
+//! Everything here is per gene and dense in the cell axis: a cell with no
+//! counts for this gene still contributes through its library size.
 //!
 //! The stationarity condition is one Wright omega evaluation per cell plus a
 //! single scalar root find for the normalisation offset `z`. Writing
@@ -214,7 +213,11 @@ pub(crate) fn solve_stationary(
         if f.abs() <= tol {
             return Ok(Stationary { v, s, log_vs, z });
         }
-        if f > 0.0 { lo = z } else { hi = z }
+        if f > 0.0 {
+            lo = z
+        } else {
+            hi = z
+        }
 
         // F'(z) = -sum_c omega_c / (1 + omega_c), from d omega / dx = omega / (1 + omega).
         let slope: f64 = omega.iter().map(|&w| w / (1.0 + w)).sum();
@@ -322,9 +325,16 @@ mod tests {
         let mut log_omega = vec![0.0; counts.len()];
         let guess = totals.iter().sum::<f64>().ln();
 
-        let point =
-            solve_stationary(v, s, &counts, &log_totals, guess, &mut omega, &mut log_omega)
-                .expect("converges");
+        let point = solve_stationary(
+            v,
+            s,
+            &counts,
+            &log_totals,
+            guess,
+            &mut omega,
+            &mut log_omega,
+        )
+        .expect("converges");
 
         for c in 0..counts.len() {
             let d = point.log_fold_change(log_omega[c], log_totals[c]);
@@ -342,9 +352,16 @@ mod tests {
         let mut log_omega = vec![0.0; counts.len()];
         let guess = 0.0;
 
-        let point =
-            solve_stationary(v, s, &counts, &log_totals, guess, &mut omega, &mut log_omega)
-                .expect("converges from a deliberately poor guess");
+        let point = solve_stationary(
+            v,
+            s,
+            &counts,
+            &log_totals,
+            guess,
+            &mut omega,
+            &mut log_omega,
+        )
+        .expect("converges from a deliberately poor guess");
 
         let lhs: f64 = (0..counts.len())
             .map(|c| totals[c] * point.log_fold_change(log_omega[c], log_totals[c]).exp())
@@ -362,9 +379,16 @@ mod tests {
         let mut log_omega = vec![0.0; counts.len()];
         let guess = totals.iter().sum::<f64>().ln();
 
-        let point =
-            solve_stationary(v, s, &counts, &log_totals, guess, &mut omega, &mut log_omega)
-                .expect("converges");
+        let point = solve_stationary(
+            v,
+            s,
+            &counts,
+            &log_totals,
+            guess,
+            &mut omega,
+            &mut log_omega,
+        )
+        .expect("converges");
 
         let expected: f64 = (0..counts.len())
             .map(|c| totals[c] * (v * counts[c]).exp())

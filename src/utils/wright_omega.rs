@@ -16,12 +16,16 @@
 //! Corless, Gonnet, Hare, Jeffrey, Knuth. *On the Lambert W function.*
 //! Adv. Comput. Math. 5:329-359 (1996).
 
+////////////
+// Consts //
+////////////
+
 /// Convergence tolerance on `t`, absolute.
 ///
 /// `g(t) = exp(t) + t - x` has `g' >= 1` everywhere, so the residual bounds the
-/// error in `t` directly and no relative test is needed. Set to a few ulp of the
-/// largest `t` this crate produces, which is `ln(ln(sum of all UMI counts))`,
-/// comfortably below 100.
+/// error in `t` directly and no relative test is needed. Set to a few ulp of
+/// the largest `t` this crate produces, which is
+/// `ln(ln(sum of all UMI counts))`, comfortably below 100.
 const OMEGA_TOL: f64 = 1e-14;
 
 /// Iteration cap for the Halley solve.
@@ -36,6 +40,10 @@ const OMEGA_MAX_ITER: usize = 8;
 /// Below it the root is bounded above by `x` itself, since `omega = x - ln omega`
 /// and `omega > 0`, and `x` is then both a safe and a tight starting point.
 const OMEGA_LARGE_X: f64 = 1.0;
+
+///////////
+// Omega //
+///////////
 
 /// Solve `exp(t) + t = x` for `t = ln omega(x)`.
 ///

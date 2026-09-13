@@ -1,9 +1,5 @@
 //! The per-gene driver: sweep the variance grid, then aggregate over it.
 //!
-//! SPEC sections 5 to 8. Genes are independent under this model, so this is the
-//! whole of the algorithm's control flow; the crate entry point does nothing but
-//! `par_iter` over it.
-//!
 //! ### Memory
 //!
 //! SI eq. 42 wants the spread of `d*_c` about its own posterior mean, which
@@ -19,6 +15,10 @@ use super::variance::cell_variance;
 use crate::config::{SanityParams, VarianceGrid, VarianceRule};
 use crate::errors::SanityErrors;
 use crate::utils::polygamma::{digamma, trigamma};
+
+/////////////////
+// GeneScratch //
+/////////////////
 
 /// Per-thread scratch for one gene, reused across genes.
 ///
@@ -74,118 +74,13 @@ impl GeneScratch {
     }
 }
 
-/// Everything one gene contributes to the run's output.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct GeneSummary {
-    /// Posterior mean of the gene's log transcription quotient, `m`.
-    pub mean_log_quotient: f64,
-    /// Error bar on `m`.
-    pub mean_log_quotient_error: f64,
-    /// Posterior estimate of the gene's variance in log fold change.
-    pub variance: f64,
-}
+//////////////
+// Frontend //
+//////////////
 
-/// Run one gene end to end.
-///
-/// Writes `d_c` into `out_fold_change` and `e_c` into `out_error`, both of
-/// length `n_cells`, and returns the gene-level summary.
-///
-/// ### Params
-///
-/// * `indices` - Cell indices of this gene's stored counts.
-/// * `values` - The stored counts, aligned with `indices`.
-/// * `log_totals` - `ln T_c` for every cell, length `n_cells`.
-/// * `log_total_sum` - `ln(sum_c T_c)`, the seed for the first offset solve.
-/// * `grid` - The variance grid.
-/// * `params` - Run parameters.
-/// * `scratch` - Per-thread scratch.
-/// * `out_fold_change` - Output, `d_c` for every cell.
-/// * `out_error` - Output, `e_c` for every cell.
-///
-/// ### Returns
-///
-/// The gene-level summary, or a solver failure.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run_gene(
-    indices: &[u32],
-    values: &[u32],
-    log_totals: &[f64],
-    log_total_sum: f64,
-    grid: &VarianceGrid,
-    params: &SanityParams,
-    scratch: &mut GeneScratch,
-    out_fold_change: &mut [f64],
-    out_error: &mut [f64],
-) -> Result<GeneSummary, SanityErrors> {
-    let n_cells = log_totals.len();
-
-    // Scatter the sparse column. Only the touched entries are cleared again at
-    // the end, so this stays O(nnz) rather than O(n_cells) for the reset.
-    let mut total_counts = 0.0;
-    for (&i, &k) in indices.iter().zip(values) {
-        scratch.counts[i as usize] = k as f64;
-        total_counts += k as f64;
-    }
-    let s = total_counts + 1.0;
-
-    let summary = match params.variance_rule {
-        VarianceRule::Fixed(v) => {
-            let point = solve_stationary(
-                v,
-                s,
-                &scratch.counts,
-                log_totals,
-                log_total_sum + 0.5 * v,
-                &mut scratch.omega,
-                &mut scratch.log_omega,
-            )?;
-            let fit = laplace(
-                &point,
-                &scratch.counts,
-                log_totals,
-                &scratch.omega,
-                &scratch.log_omega,
-            );
-            write_point_estimate(
-                &point,
-                &fit,
-                &scratch.counts,
-                log_totals,
-                &scratch.omega,
-                &scratch.log_omega,
-                out_fold_change,
-                out_error,
-            );
-            GeneSummary {
-                mean_log_quotient: digamma(s) - point.z,
-                mean_log_quotient_error: trigamma(s).sqrt(),
-                variance: v,
-            }
-        }
-        rule => {
-            sweep_grid(s, log_totals, log_total_sum, grid, scratch)?;
-            posterior_weights(&scratch.log_lik, &mut scratch.weights);
-            match rule {
-                VarianceRule::Marginalise => marginalise(
-                    s,
-                    log_totals,
-                    grid,
-                    scratch,
-                    out_fold_change,
-                    out_error,
-                    n_cells,
-                ),
-                _ => collapse(rule, s, log_totals, log_total_sum, grid, scratch, out_fold_change, out_error)?,
-            }
-        }
-    };
-
-    for &i in indices {
-        scratch.counts[i as usize] = 0.0;
-    }
-
-    Ok(summary)
-}
+/////////////
+// Helpers //
+/////////////
 
 /// First pass: solve the offset and the marginal likelihood in every bin.
 ///
@@ -479,7 +374,132 @@ fn write_point_estimate(
     for c in 0..counts.len() {
         let d = point.log_fold_change(log_omega[c], log_totals[c]);
         out_fold_change[c] = d;
-        out_error[c] =
-            cell_variance(point, counts[c], d, omega[c], fit.curvature_sum).sqrt();
+        out_error[c] = cell_variance(point, counts[c], d, omega[c], fit.curvature_sum).sqrt();
     }
+}
+
+/////////////////
+// GeneSummary //
+/////////////////
+
+/// Everything one gene contributes to the run's output.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GeneSummary {
+    /// Posterior mean of the gene's log transcription quotient, `m`.
+    pub mean_log_quotient: f64,
+    /// Error bar on `m`.
+    pub mean_log_quotient_error: f64,
+    /// Posterior estimate of the gene's variance in log fold change.
+    pub variance: f64,
+}
+
+/// Run one gene end to end.
+///
+/// Writes `d_c` into `out_fold_change` and `e_c` into `out_error`, both of
+/// length `n_cells`, and returns the gene-level summary.
+///
+/// ### Params
+///
+/// * `indices` - Cell indices of this gene's stored counts.
+/// * `values` - The stored counts, aligned with `indices`.
+/// * `log_totals` - `ln T_c` for every cell, length `n_cells`.
+/// * `log_total_sum` - `ln(sum_c T_c)`, the seed for the first offset solve.
+/// * `grid` - The variance grid.
+/// * `params` - Run parameters.
+/// * `scratch` - Per-thread scratch.
+/// * `out_fold_change` - Output, `d_c` for every cell.
+/// * `out_error` - Output, `e_c` for every cell.
+///
+/// ### Returns
+///
+/// The gene-level summary, or a solver failure.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_gene(
+    indices: &[u32],
+    values: &[u32],
+    log_totals: &[f64],
+    log_total_sum: f64,
+    grid: &VarianceGrid,
+    params: &SanityParams,
+    scratch: &mut GeneScratch,
+    out_fold_change: &mut [f64],
+    out_error: &mut [f64],
+) -> Result<GeneSummary, SanityErrors> {
+    let n_cells = log_totals.len();
+
+    // Scatter the sparse column. Only the touched entries are cleared again at
+    // the end, so this stays O(nnz) rather than O(n_cells) for the reset.
+    let mut total_counts = 0.0;
+    for (&i, &k) in indices.iter().zip(values) {
+        scratch.counts[i as usize] = k as f64;
+        total_counts += k as f64;
+    }
+    let s = total_counts + 1.0;
+
+    let summary = match params.variance_rule {
+        VarianceRule::Fixed(v) => {
+            let point = solve_stationary(
+                v,
+                s,
+                &scratch.counts,
+                log_totals,
+                log_total_sum + 0.5 * v,
+                &mut scratch.omega,
+                &mut scratch.log_omega,
+            )?;
+            let fit = laplace(
+                &point,
+                &scratch.counts,
+                log_totals,
+                &scratch.omega,
+                &scratch.log_omega,
+            );
+            write_point_estimate(
+                &point,
+                &fit,
+                &scratch.counts,
+                log_totals,
+                &scratch.omega,
+                &scratch.log_omega,
+                out_fold_change,
+                out_error,
+            );
+            GeneSummary {
+                mean_log_quotient: digamma(s) - point.z,
+                mean_log_quotient_error: trigamma(s).sqrt(),
+                variance: v,
+            }
+        }
+        rule => {
+            sweep_grid(s, log_totals, log_total_sum, grid, scratch)?;
+            posterior_weights(&scratch.log_lik, &mut scratch.weights);
+            match rule {
+                VarianceRule::Marginalise => marginalise(
+                    s,
+                    log_totals,
+                    grid,
+                    scratch,
+                    out_fold_change,
+                    out_error,
+                    n_cells,
+                ),
+                _ => collapse(
+                    rule,
+                    s,
+                    log_totals,
+                    log_total_sum,
+                    grid,
+                    scratch,
+                    out_fold_change,
+                    out_error,
+                )?,
+            }
+        }
+    };
+
+    for &i in indices {
+        scratch.counts[i as usize] = 0.0;
+    }
+
+    Ok(summary)
 }

@@ -8,11 +8,11 @@
 use num_traits::{Float, FromPrimitive, ToPrimitive};
 use std::fmt::Debug;
 
+/////////////////
+// SanityFloat //
+/////////////////
+
 /// Float types this crate will store inputs and outputs in.
-///
-/// The bound is deliberately thin: nothing in the algorithm is computed at `T`
-/// precision, so `T` only needs to convert to and from `f64` and to cross thread
-/// boundaries.
 pub trait SanityFloat:
     Float + FromPrimitive + ToPrimitive + Send + Sync + Debug + Default + 'static
 {

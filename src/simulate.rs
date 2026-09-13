@@ -1,8 +1,8 @@
 //! Ground-truth simulator.
 //!
-//! SPEC section 10, SI S1.2. Generates UMI counts from the model's own
-//! generative process, so that both this crate and any reference binary can be
-//! measured against a truth neither of them produced.
+//! Generates UMI counts from the model's own generative process, so that both
+//! this crate and any reference binary can be measured against a truth neither
+//! of them produced.
 //!
 //! Two recipes. The independent one draws every cell's log fold change from the
 //! prior. The branched one walks the log fold changes along a tree, which
@@ -15,18 +15,18 @@ use rand_distr::{Distribution, Exp, LogNormal, Normal, Poisson};
 use crate::errors::SanityErrors;
 use crate::input::CountMatrix;
 
+////////////
+// Consts //
+////////////
+
 /// Mean of the exponential distribution the per-gene variances are drawn from.
-///
-/// SI S1.2 reports that Sanity's estimated variances are roughly exponential
-/// with a mean near two in the reference dataset. That is a statement about
-/// real data in the paper's text, not a constant lifted from their code.
 pub const DEFAULT_VARIANCE_MEAN: f64 = 2.0;
 
 /// Standard deviation, in the logarithm, of the simulated library sizes.
 ///
 /// Droplet library sizes are heavily right skewed and a log-normal with this
-/// width reproduces the usual order-of-magnitude spread between the smallest and
-/// largest cells in a run.
+/// width reproduces the usual order-of-magnitude spread between the smallest
+/// and largest cells in a run.
 pub const DEFAULT_LIBRARY_LOG_SD: f64 = 0.5;
 
 /// Standard deviation, in the logarithm, of the simulated mean quotients.
@@ -37,9 +37,11 @@ pub const DEFAULT_LIBRARY_LOG_SD: f64 = 0.5;
 pub const DEFAULT_QUOTIENT_LOG_SD: f64 = 2.0;
 
 /// Cells per branch in the branched recipe.
-///
-/// SI S1.2 restarts the walk from a random existing cell at this interval.
 pub const DEFAULT_BRANCH_LENGTH: usize = 13;
+
+///////////////////////
+// ExpressionPattern //
+///////////////////////
 
 /// How the per-cell log fold changes are drawn.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -54,6 +56,10 @@ pub enum ExpressionPattern {
         branch_length: usize,
     },
 }
+
+//////////////////////
+// SimulationParams //
+//////////////////////
 
 /// Parameters for a simulated dataset.
 #[derive(Clone, Copy, Debug)]
@@ -89,6 +95,82 @@ impl Default for SimulationParams {
             seed: 0,
         }
     }
+}
+
+/////////////
+// Helpers //
+/////////////
+
+/// Draw the log fold changes under the requested pattern.
+///
+/// ### Params
+///
+/// * `params` - Simulation parameters.
+/// * `variance` - Per-gene variance.
+/// * `rng` - The seeded generator.
+///
+/// ### Returns
+///
+/// A gene-major `n_genes * n_cells` matrix of log fold changes.
+fn draw_log_fold_changes(
+    params: &SimulationParams,
+    variance: &[f64],
+    rng: &mut StdRng,
+) -> Vec<f64> {
+    let n = params.n_genes * params.n_cells;
+    let mut out = vec![0.0f64; n];
+    let unit = Normal::new(0.0, 1.0).expect("the unit normal is well formed");
+
+    match params.pattern {
+        ExpressionPattern::Independent => {
+            for g in 0..params.n_genes {
+                let sd = variance[g].sqrt();
+                let row = &mut out[g * params.n_cells..(g + 1) * params.n_cells];
+                for x in row.iter_mut() {
+                    *x = sd * unit.sample(rng);
+                }
+            }
+        }
+        ExpressionPattern::Branched { branch_length } => {
+            // One tree shared by all genes: the parent assignment is a property
+            // of the cells, not of any gene.
+            let branch_length = branch_length.max(1);
+            let mut parent = vec![0usize; params.n_cells];
+            for (c, slot) in parent.iter_mut().enumerate().skip(1) {
+                *slot = if c % branch_length == 0 {
+                    rng.random_range(0..c)
+                } else {
+                    c - 1
+                };
+            }
+
+            for g in 0..params.n_genes {
+                let row = &mut out[g * params.n_cells..(g + 1) * params.n_cells];
+                for c in 0..params.n_cells {
+                    row[c] = if c == 0 {
+                        unit.sample(rng)
+                    } else {
+                        row[parent[c]] + unit.sample(rng)
+                    };
+                }
+
+                // Rescale so the gene's realised variance is the assigned one.
+                let mean = row.iter().sum::<f64>() / params.n_cells as f64;
+                let realised = row.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>()
+                    / params.n_cells as f64;
+                let scale = if realised > 0.0 {
+                    (variance[g] / realised).sqrt()
+                } else {
+                    0.0
+                };
+                for x in row.iter_mut() {
+                    *x = (*x - mean) * scale;
+                }
+            }
+        }
+    }
+
+    out
 }
 
 /// A simulated dataset and the truth behind it.
@@ -128,7 +210,9 @@ pub fn simulate(params: Option<SimulationParams>) -> Result<Simulation, SanityEr
     // Mean quotients, normalised so that sum_g exp(mean_log_quotient) = 1.
     let quotient = LogNormal::new(0.0, params.quotient_log_sd)
         .expect("the log-normal parameters are finite and the width is positive");
-    let raw: Vec<f64> = (0..params.n_genes).map(|_| quotient.sample(&mut rng)).collect();
+    let raw: Vec<f64> = (0..params.n_genes)
+        .map(|_| quotient.sample(&mut rng))
+        .collect();
     let raw_sum: f64 = raw.iter().sum();
     let mean_log_quotient: Vec<f64> = raw.iter().map(|x| (x / raw_sum).ln()).collect();
 
@@ -189,78 +273,6 @@ pub fn simulate(params: Option<SimulationParams>) -> Result<Simulation, SanityEr
         variance,
         log_fold_changes,
     })
-}
-
-/// Draw the log fold changes under the requested pattern.
-///
-/// ### Params
-///
-/// * `params` - Simulation parameters.
-/// * `variance` - Per-gene variance.
-/// * `rng` - The seeded generator.
-///
-/// ### Returns
-///
-/// A gene-major `n_genes * n_cells` matrix of log fold changes.
-fn draw_log_fold_changes(
-    params: &SimulationParams,
-    variance: &[f64],
-    rng: &mut StdRng,
-) -> Vec<f64> {
-    let n = params.n_genes * params.n_cells;
-    let mut out = vec![0.0f64; n];
-    let unit = Normal::new(0.0, 1.0).expect("the unit normal is well formed");
-
-    match params.pattern {
-        ExpressionPattern::Independent => {
-            for g in 0..params.n_genes {
-                let sd = variance[g].sqrt();
-                let row = &mut out[g * params.n_cells..(g + 1) * params.n_cells];
-                for x in row.iter_mut() {
-                    *x = sd * unit.sample(rng);
-                }
-            }
-        }
-        ExpressionPattern::Branched { branch_length } => {
-            // One tree shared by all genes: the parent assignment is a property
-            // of the cells, not of any gene.
-            let branch_length = branch_length.max(1);
-            let mut parent = vec![0usize; params.n_cells];
-            for (c, slot) in parent.iter_mut().enumerate().skip(1) {
-                *slot = if c % branch_length == 0 {
-                    rng.random_range(0..c)
-                } else {
-                    c - 1
-                };
-            }
-
-            for g in 0..params.n_genes {
-                let row = &mut out[g * params.n_cells..(g + 1) * params.n_cells];
-                for c in 0..params.n_cells {
-                    row[c] = if c == 0 {
-                        unit.sample(rng)
-                    } else {
-                        row[parent[c]] + unit.sample(rng)
-                    };
-                }
-
-                // Rescale so the gene's realised variance is the assigned one.
-                let mean = row.iter().sum::<f64>() / params.n_cells as f64;
-                let realised =
-                    row.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / params.n_cells as f64;
-                let scale = if realised > 0.0 {
-                    (variance[g] / realised).sqrt()
-                } else {
-                    0.0
-                };
-                for x in row.iter_mut() {
-                    *x = (*x - mean) * scale;
-                }
-            }
-        }
-    }
-
-    out
 }
 
 ///////////

@@ -1,8 +1,8 @@
 //! Run parameters and the variance grid.
-//!
-//! SPEC section 5 and 7. The grid bounds and the bin count are this crate's
-//! choice, derived below, and are not taken from the reference implementation.
-//! See `PROVENANCE.md`, rule 3.
+
+////////////
+// Consts //
+////////////
 
 /// Lower bound of the variance grid.
 ///
@@ -154,7 +154,9 @@ impl VarianceGrid {
         let log_min = min.ln();
         let step = (max.ln() - log_min) / (bins - 1) as f64;
         Self {
-            values: (0..bins).map(|b| (log_min + step * b as f64).exp()).collect(),
+            values: (0..bins)
+                .map(|b| (log_min + step * b as f64).exp())
+                .collect(),
         }
     }
 
@@ -213,6 +215,10 @@ mod tests {
     fn test_single_bin_grid_is_the_geometric_mean() {
         let grid = VarianceGrid::new(1e-3, 50.0, 1);
         assert_eq!(grid.len(), 1);
-        assert_relative_eq!(grid.values[0], (1e-3f64 * 50.0).sqrt(), max_relative = 1e-12);
+        assert_relative_eq!(
+            grid.values[0],
+            (1e-3f64 * 50.0).sqrt(),
+            max_relative = 1e-12
+        );
     }
 }

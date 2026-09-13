@@ -44,6 +44,10 @@ use crate::float::{SanityFloat, narrow};
 use crate::input::CountMatrix;
 use crate::model::gene::{GeneScratch, run_gene};
 
+//////////////////
+// SanityOutput //
+//////////////////
+
 /// Everything a run produces.
 ///
 /// The two per-cell matrices are gene-major and dense: gene `g`, cell `c` is at

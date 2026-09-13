@@ -1,15 +1,18 @@
 //! Per-cell posterior variance of the log fold change at a fixed gene variance.
 //!
-//! SPEC section 4, SI eq. 35-38.
-//!
 //! Two rules. For cells with counts, the diagonal of `M^{-1}` from the minor
 //! over the determinant, which reduces to `omega_c` and the rank-one sum that
 //! [`super::likelihood::laplace`] has already accumulated. For cells with no
-//! counts the log posterior is asymmetric about its maximum -- zero counts bound
-//! the log fold change from above but are consistent with arbitrarily low values
-//! -- so the Gaussian width is replaced by the half-unit drop of SI eq. 38.
+//! counts the log posterior is asymmetric about its maximum -- zero counts
+//! bound the log fold change from above but are consistent with arbitrarily low
+//! values -- so the Gaussian width is replaced by the half-unit drop of SI
+//! eq. 38.
 
 use super::fractions::Stationary;
+
+////////////
+// Consts //
+////////////
 
 /// Target drop in log posterior that defines the error bar for empty cells.
 ///
@@ -101,7 +104,11 @@ pub(crate) fn empty_cell_variance(point: &Stationary, d: f64, omega: f64) -> f64
         if f.abs() <= SIGMA_TOL {
             break;
         }
-        if f < 0.0 { lo = sigma } else { hi = sigma }
+        if f < 0.0 {
+            lo = sigma
+        } else {
+            hi = sigma
+        }
 
         let e = sigma.exp();
         let denominator = 1.0 + w * (e - 1.0);
@@ -254,8 +261,7 @@ mod tests {
                 let d = point.log_fold_change(log_omega[c], log_totals[c]);
                 let sigma = empty_cell_variance(&point, d, omega[c]).sqrt();
                 let w = point.weight(omega[c]);
-                let drop =
-                    sigma * (2.0 * d + sigma) / (2.0 * v) + s * (w * sigma.exp_m1()).ln_1p();
+                let drop = sigma * (2.0 * d + sigma) / (2.0 * v) + s * (w * sigma.exp_m1()).ln_1p();
                 assert_relative_eq!(drop, 0.5, max_relative = 1e-9);
             }
         }

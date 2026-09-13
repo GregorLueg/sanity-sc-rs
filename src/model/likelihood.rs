@@ -1,11 +1,9 @@
 //! The Laplace-approximated marginal likelihood of one gene at one variance.
 //!
-//! SPEC section 3, SI eq. 20 and 29-33.
-//!
 //! The curvature matrix is diagonal plus rank one, so its determinant follows
 //! from the matrix determinant lemma. SI eq. 33 writes the rank-one correction
-//! as `1 - sum_c s w_c^2 / (s w_c + 1/v)`, which tends to a difference of nearly
-//! equal numbers as `v` grows. The identity used here,
+//! as `1 - sum_c s w_c^2 / (s w_c + 1/v)`, which tends to a difference of
+//! nearly equal numbers as `v` grows. The identity used here,
 //! `1 - S = sum_c w_c / (1 + v s w_c)`, is exact, manifestly positive and free
 //! of that cancellation.
 //!
@@ -14,6 +12,10 @@
 //! is therefore a single fused pass over `omega`.
 
 use super::fractions::Stationary;
+
+/////////////
+// Laplace //
+/////////////
 
 /// Per-gene, per-bin reductions of the Laplace approximation.
 ///
@@ -151,8 +153,7 @@ mod tests {
             for &w in &omega {
                 sum_log_diag += w.ln_1p();
             }
-            let log_det =
-                fast.curvature_sum.ln() - point.log_vs + sum_log_diag - n * v.ln();
+            let log_det = fast.curvature_sum.ln() - point.log_vs + sum_log_diag - n * v.ln();
 
             assert_relative_eq!(
                 log_det,

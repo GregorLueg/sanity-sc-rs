@@ -7,6 +7,10 @@
 
 use crate::errors::SanityErrors;
 
+/////////////////
+// CountMatrix //
+/////////////////
+
 /// A sparse UMI count matrix, gene-major.
 ///
 /// Layout is CSC with genes as columns: `indptr[g]..indptr[g + 1]` slices

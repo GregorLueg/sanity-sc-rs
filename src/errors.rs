@@ -37,7 +37,6 @@ pub enum SanityErrors {
         total: f64,
     },
 
-
     #[error(
         "The gene offsets are malformed: they run from {first} to {last} over {n_stored} stored counts, and must be ascending from zero to that total."
     )]
@@ -73,16 +72,18 @@ pub enum SanityErrors {
         bins: usize,
     },
 
-    #[error("A fixed variance of {variance:e} was requested; it must be finite and strictly positive.")]
+    #[error(
+        "A fixed variance of {variance:e} was requested; it must be finite and strictly positive."
+    )]
     /// `VarianceRule::Fixed` was handed a variance the model cannot use.
     InvalidFixedVariance {
         /// The variance that was supplied.
         variance: f64,
     },
 
-    //////////////
-    // Solvers  //
-    //////////////
+    /////////////
+    // Solvers //
+    /////////////
     #[error(
         "The per-cell fraction solve did not converge in {iterations} iterations; the residual was {residual:e}."
     )]

@@ -8,6 +8,10 @@
 //!
 //! Recurrence up to a threshold, then the standard asymptotic expansion.
 
+////////////
+// Consts //
+////////////
+
 /// Argument above which the asymptotic expansions are used directly.
 ///
 /// Below it, `psi(x) = psi(x + 1) - 1/x` and `psi1(x) = psi1(x + 1) + 1/x^2`
@@ -15,6 +19,10 @@
 /// below `1e-16` relative, checked against `Rscript -e 'digamma(...)'` on
 /// 2026-09-13.
 const POLYGAMMA_SHIFT: f64 = 12.0;
+
+/////////////////////////
+// Gamma distributions //
+/////////////////////////
 
 /// Digamma, the logarithmic derivative of the gamma function.
 ///
@@ -41,7 +49,8 @@ pub(crate) fn digamma(x: f64) -> f64 {
     // psi(z) ~ ln z - 1/(2z) - sum_k B_{2k} / (2k z^{2k})
     let r = 1.0 / z;
     let r2 = r * r;
-    acc + z.ln() - 0.5 * r
+    acc + z.ln()
+        - 0.5 * r
         - r2 * (1.0 / 12.0
             - r2 * (1.0 / 120.0 - r2 * (1.0 / 252.0 - r2 * (1.0 / 240.0 - r2 / 132.0))))
 }
