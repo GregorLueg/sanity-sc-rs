@@ -231,7 +231,10 @@ Compute in log space: subtract `max_b L_b` before exponentiating.
 
 `v_min`, `v_max` and `B` are this crate's to choose and are named constants with
 dated provenance in their doc comments. They are not taken from the reference
-implementation.
+implementation. `B = 161` is the coarsest rung of a `2^k + 1` refinement ladder
+at which doubling the grid moves every estimate by under 1% of its own reported
+error bar (measured 2026-09-13). Section 7's `MaxPosterior` is exempt: it does
+not converge under refinement at any `B`.
 
 The gene's variance estimate is the posterior mean, `<v> = sum_b W_b v_b`. For
 very lowly expressed genes this is small even when the true variance is large;

@@ -24,11 +24,18 @@ pub const DEFAULT_VARIANCE_MAX: f64 = 50.0;
 
 /// Number of bins, equally spaced in `ln v`.
 ///
-/// Provisional. Over the default bounds this puts neighbouring bins about 7%
-/// apart in variance. The number that matters is whether doubling it moves the
-/// outputs, which is a convergence check against our own simulated data and has
-/// not yet been run; until it has, this constant carries no measurement.
-pub const DEFAULT_VARIANCE_BINS: usize = 160;
+/// Measured 2026-09-13. Refining the grid along a `2^k + 1` ladder, so that each
+/// finer grid contains every point of the coarser ones, 161 is the coarsest rung
+/// at which a further doubling moves every estimate by less than 1% of the error
+/// bar the method itself reports for that estimate. Checked on 500 simulated
+/// genes over 500 cells and on 300 real genes over 498 cells; 81 bins suffices
+/// for the real data but not for the simulated, which carries wider variances.
+///
+/// This applies to [`VarianceRule::Marginalise`]. [`VarianceRule::MaxPosterior`]
+/// does not converge under grid refinement at all, by construction: it selects a
+/// bin by discrete argmax, so a finer grid keeps changing which bin wins. At 641
+/// bins it was still moving by 3% of an error bar.
+pub const DEFAULT_VARIANCE_BINS: usize = 161;
 
 /// How the per-gene variance enters the final estimates.
 ///
@@ -42,6 +49,10 @@ pub enum VarianceRule {
     /// Collapse to the posterior mean `sum_b W_b v_b` and re-solve there.
     PosteriorMean,
     /// Collapse to the most probable bin, `argmax_b L_b`.
+    ///
+    /// The only rule whose output depends on the grid no matter how fine it is:
+    /// the argmax is discrete, so refining the grid keeps moving the selected
+    /// bin. Use it for speed, not for a number you intend to quote.
     MaxPosterior,
     /// Use the supplied variance for every gene; no grid and no scan.
     Fixed(f64),
