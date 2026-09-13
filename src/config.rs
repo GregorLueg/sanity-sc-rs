@@ -53,6 +53,10 @@ pub enum VarianceRule {
     /// The only rule whose output depends on the grid no matter how fine it is:
     /// the argmax is discrete, so refining the grid keeps moving the selected
     /// bin. Use it for speed, not for a number you intend to quote.
+    ///
+    /// `d_c` and `e_c` come from the selected bin, but the reported `variance`
+    /// stays the posterior mean over the whole grid, by design: the argmax is
+    /// the wrong summary of a posterior to quote back to a caller.
     MaxPosterior,
     /// Use the supplied variance for every gene; no grid and no scan.
     Fixed(f64),

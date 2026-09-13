@@ -96,7 +96,7 @@ which is well conditioned over the whole real line and is what the downstream
 kernels want anyway, since `ln w_c = t_c - ln(v s)`. Halley on `g(t) = e^t + t - x`
 converges cubically from the initial guesses
 
-    t0 = x - exp(x)        for x <= 0     (e^t is small; t is near x)
+    t0 = x                 for x <= 1     (omega <= x, so t <= ln x < x)
     t0 = ln(x - ln x)      for x  > 1     (omega ~ x - ln x)
 
 Recover omega without cancellation by branch:

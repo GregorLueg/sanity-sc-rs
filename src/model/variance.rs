@@ -98,6 +98,9 @@ pub(crate) fn empty_cell_variance(point: &Stationary, d: f64, omega: f64) -> f64
         }
     }
 
+    // No divergence error, unlike the offset solve: `sigma` is bounded by
+    // roughly `sqrt(v)`, so the bracket spans at most eight units and bisection
+    // alone resolves it to machine precision well inside the iteration cap.
     let mut sigma = seed.min(hi);
     for _ in 0..SIGMA_MAX_ITER {
         let f = drop(sigma);
