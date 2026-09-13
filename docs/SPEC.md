@@ -174,6 +174,26 @@ All reductions accumulate in `f64`, whatever the storage type. The differences
 between neighbouring bins are small against the sum, and `f32` accumulation
 flattens the posterior enough to make the bin choice noise.
 
+### 3.2 Known bias of the Laplace step
+
+Measured 2026-09-13 against an exact reference, obtained by applying the gamma
+identity `A^{-s} = Gamma(s)^{-1} int_0^inf dt t^{s-1} exp(-A t)` to the coupling
+term, which decouples the cells and reduces the `C`-dimensional integral to
+nested 1-D quadrature. Verified to `1e-14` against direct 3-D quadrature at
+`C = 3`.
+
+The Laplace step systematically **underestimates** the posterior mean of `v`,
+across fourteen gene profiles spanning `C` from 100 to 2000 and `K` from 3 to
+10069. The bias is one-signed and bounded: 0 to -23%, median -12%. It vanishes
+at high coverage (-0.0% at 20 UMIs per cell) and is worst for genes whose counts
+sit in a small fraction of cells, where the per-cell posterior is most
+asymmetric and least Gaussian.
+
+This is left uncorrected. The bias only bites genes carrying almost no
+information about `v` in the first place (SI S3.8), and the obvious fix does not
+work: the next-order Laplace term, `sum_c [L'''' / (8 h^2) + 5 (L''')^2 / (24
+h^3)]`, was measured and makes the estimate substantially *worse*, not better.
+
 ## 4. Per-cell variance at fixed `v`
 
 `SI (35)-(37)`. The posterior over `d` at fixed `v` is Gaussian with covariance
