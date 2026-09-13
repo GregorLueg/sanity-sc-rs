@@ -18,6 +18,23 @@ use crate::utils::wright_omega::{log_omega, omega_from_log};
 /// orders of magnitude across genes and variance bins.
 const OFFSET_TOL: f64 = 1e-13;
 
+/// Ulp budget for the naive summation behind the offset residual.
+///
+/// `sum_c omega_c` is accumulated in one pass over `n_cells` terms, so its own
+/// rounding noise grows as `C * eps` and overtakes [`OFFSET_TOL`] well before
+/// `1e5` cells. Measured 2026-09-13: one gene, counts 1-7 in every third cell,
+/// uniform `T_c = 5000`, 21 bins, failed at `C = 20_000` with residual
+/// `2.68e-11` against `v s = 26 681`. Four ulp per term covers the worst
+/// ordering of that sum.
+const OFFSET_SUM_ULPS: f64 = 4.0;
+
+/// Bracket width at which the offset is as resolved as `f64` allows.
+///
+/// Scaled by `1 + |z|` because `z` is a logarithm and can sit either side of
+/// one. Once the bracket is this narrow, bisection cannot separate the two ends
+/// and the residual test can only be met by luck.
+const OFFSET_BRACKET_ULPS: f64 = 4.0;
+
 /// Iteration cap for the Newton solve on the offset.
 ///
 /// Newton on a monotone function with an exact derivative, bracketed and warm
@@ -148,7 +165,8 @@ fn evaluate(
 /// ### Returns
 ///
 /// The stationary point, or [`SanityErrors::FractionSolveDiverged`] if neither
-/// the bracket nor the Newton loop settles.
+/// the bracket nor the Newton loop settles. A root whose bracket has collapsed
+/// to a few ulp is returned regardless of the residual.
 pub(crate) fn solve_stationary(
     v: f64,
     s: f64,
@@ -160,7 +178,7 @@ pub(crate) fn solve_stationary(
 ) -> Result<Stationary, SanityErrors> {
     let vs = v * s;
     let log_vs = vs.ln();
-    let tol = OFFSET_TOL * vs;
+    let tol = vs * OFFSET_TOL.max(OFFSET_SUM_ULPS * counts.len() as f64 * f64::EPSILON);
 
     let residual = |z: f64, omega: &mut [f64], log_omega: &mut [f64]| {
         evaluate(v, log_vs, z, counts, log_totals, omega, log_omega) - vs
@@ -217,6 +235,11 @@ pub(crate) fn solve_stationary(
             lo = z
         } else {
             hi = z
+        }
+        // The root is converged to machine precision; the residual test below
+        // its own summation noise can no longer be met.
+        if hi - lo <= OFFSET_BRACKET_ULPS * f64::EPSILON * (1.0 + z.abs()) {
+            return Ok(Stationary { v, s, log_vs, z });
         }
 
         // F'(z) = -sum_c omega_c / (1 + omega_c), from d omega / dx = omega / (1 + omega).
