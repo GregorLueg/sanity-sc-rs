@@ -50,6 +50,23 @@ pub enum SanityErrors {
         n_stored: usize,
     },
 
+    #[error("The count matrix declares zero cells; there is nothing to condition on.")]
+    /// The matrix has no cell axis at all.
+    NoCells,
+
+    #[error(
+        "Gene {gene} stores cell index {index} after {previous}; a gene's indices must be strictly ascending."
+    )]
+    /// A sparse column is unsorted or names the same cell twice.
+    UnsortedGeneIndices {
+        /// The offending gene.
+        gene: usize,
+        /// The index that broke the order.
+        index: usize,
+        /// The index stored immediately before it.
+        previous: usize,
+    },
+
     #[error("{n_totals} per-cell totals were supplied for {n_cells} cells.")]
     /// The vector of library sizes does not match the matrix.
     CellTotalsLengthMismatch {
