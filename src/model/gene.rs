@@ -144,8 +144,14 @@ fn sweep_grid(
 ///
 /// ### Returns
 ///
-/// Nothing; `weights` is overwritten.
-fn posterior_weights(log_lik: &[f64], weights: &mut [f64]) {
+/// Nothing; `weights` is overwritten, or
+/// [`SanityErrors::NonFiniteBinLikelihood`] if a bin is unusable. The check is
+/// up front because `fold(NEG_INFINITY, f64::max)` skips a NaN, which would
+/// then propagate silently into every output for the gene.
+fn posterior_weights(log_lik: &[f64], weights: &mut [f64]) -> Result<(), SanityErrors> {
+    if let Some((bin, &value)) = log_lik.iter().enumerate().find(|(_, l)| !l.is_finite()) {
+        return Err(SanityErrors::NonFiniteBinLikelihood { bin, value });
+    }
     let peak = log_lik.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let mut total = 0.0;
     for (w, &l) in weights.iter_mut().zip(log_lik) {
@@ -156,6 +162,7 @@ fn posterior_weights(log_lik: &[f64], weights: &mut [f64]) {
     for w in weights.iter_mut() {
         *w *= scale;
     }
+    Ok(())
 }
 
 /// Second pass: integrate the per-cell estimates over the variance posterior.
@@ -257,14 +264,13 @@ fn marginalise(
 ///
 /// SPEC section 7. [`VarianceRule::MaxPosterior`] reuses the offset already
 /// stored for that bin; [`VarianceRule::PosteriorMean`] lands between bins and
-/// so re-solves, warm started from the nearest stored offset.
+/// so re-solves, warm started from the offset of the bin nearest `<v>`.
 ///
 /// ### Params
 ///
 /// * `rule` - The collapsing rule.
 /// * `s` - `K + 1` for this gene.
 /// * `log_totals` - `ln T_c` for every cell.
-/// * `log_total_sum` - `ln(sum_c T_c)`.
 /// * `grid` - The variance grid.
 /// * `scratch` - Per-thread scratch.
 /// * `out_fold_change` - Output, `d_c` for every cell.
@@ -273,12 +279,10 @@ fn marginalise(
 /// ### Returns
 ///
 /// The gene-level summary, or a solver failure.
-#[allow(clippy::too_many_arguments)]
 fn collapse(
     rule: VarianceRule,
     s: f64,
     log_totals: &[f64],
-    log_total_sum: f64,
     grid: &VarianceGrid,
     scratch: &mut GeneScratch,
     out_fold_change: &mut [f64],
@@ -303,7 +307,20 @@ fn collapse(
                 .0;
             (grid.values[best], scratch.offsets[best])
         }
-        _ => (posterior_mean, log_total_sum + 0.5 * posterior_mean),
+        _ => {
+            // The grid ascends, so the first bin at or above `<v>` and the one
+            // below it bracket it; take the closer of the two.
+            let above = grid.values.partition_point(|&v| v < posterior_mean);
+            let nearest = match above {
+                0 => 0,
+                b if b == grid.values.len() => b - 1,
+                b if posterior_mean - grid.values[b - 1] <= grid.values[b] - posterior_mean => {
+                    b - 1
+                }
+                b => b,
+            };
+            (posterior_mean, scratch.offsets[nearest])
+        }
     };
 
     let point = solve_stationary(
@@ -472,7 +489,7 @@ pub(crate) fn run_gene(
         }
         rule => {
             sweep_grid(s, log_totals, log_total_sum, grid, scratch)?;
-            posterior_weights(&scratch.log_lik, &mut scratch.weights);
+            posterior_weights(&scratch.log_lik, &mut scratch.weights)?;
             match rule {
                 VarianceRule::Marginalise => marginalise(
                     s,
@@ -487,7 +504,6 @@ pub(crate) fn run_gene(
                     rule,
                     s,
                     log_totals,
-                    log_total_sum,
                     grid,
                     scratch,
                     out_fold_change,
