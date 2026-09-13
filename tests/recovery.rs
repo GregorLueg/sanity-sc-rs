@@ -158,8 +158,84 @@ fn test_f32_storage_agrees_with_f64() {
     let wide = sanity::<f64>(&sim.counts, &sim.cell_totals, None).expect("runs");
     let narrow = sanity::<f32>(&sim.counts, &sim.cell_totals, None).expect("runs");
 
-    for (a, b) in wide.log_fold_changes.iter().zip(&narrow.log_fold_changes) {
-        assert!((a - *b as f64).abs() < 1e-5 * a.abs().max(1.0));
+    let pairs: [(&[f64], &[f32], &str); 5] = [
+        (&wide.log_fold_changes, &narrow.log_fold_changes, "log_fold_changes"),
+        (&wide.error_bars, &narrow.error_bars, "error_bars"),
+        (&wide.mean_log_quotient, &narrow.mean_log_quotient, "mean_log_quotient"),
+        (
+            &wide.mean_log_quotient_error,
+            &narrow.mean_log_quotient_error,
+            "mean_log_quotient_error",
+        ),
+        (&wide.variance, &narrow.variance, "variance"),
+    ];
+    for (a, b, name) in pairs {
+        assert_eq!(a.len(), b.len(), "{name} lengths differ");
+        for (x, y) in a.iter().zip(b) {
+            assert!(
+                (x - *y as f64).abs() < 1e-5 * x.abs().max(1.0),
+                "{name}: {x} against {y}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_fixed_variance_runs_end_to_end() {
+    let sim = simulate(Some(SimulationParams {
+        n_genes: 40,
+        n_cells: 60,
+        seed: 11,
+        ..Default::default()
+    }))
+    .expect("simulates");
+
+    let params = SanityParams {
+        variance_rule: VarianceRule::Fixed(0.8),
+        ..Default::default()
+    };
+    let out = sanity::<f64>(&sim.counts, &sim.cell_totals, Some(params)).expect("runs");
+
+    assert!(out.variance.iter().all(|&v| v == 0.8));
+    assert!(out.log_fold_changes.iter().all(|x| x.is_finite()));
+    assert!(out.error_bars.iter().all(|&e| e > 0.0 && e.is_finite()));
+    assert!(out.mean_log_quotient.iter().all(|x| x.is_finite()));
+}
+
+#[test]
+fn test_rejects_a_non_positive_fixed_variance() {
+    use sanity_rs::errors::SanityErrors;
+    use sanity_rs::input::CountMatrix;
+
+    let counts = CountMatrix::new(vec![0, 2], vec![3, 5], vec![0, 2], 4).expect("well formed");
+    let params = SanityParams {
+        variance_rule: VarianceRule::Fixed(0.0),
+        ..Default::default()
+    };
+    let err = sanity::<f64>(&counts, &[100.0, 200.0, 300.0, 50.0], Some(params)).unwrap_err();
+    assert!(matches!(err, SanityErrors::InvalidFixedVariance { variance: 0.0 }));
+}
+
+#[test]
+fn test_log_transcription_quotients_add_the_gene_mean() {
+    let sim = simulate(Some(SimulationParams {
+        n_genes: 20,
+        n_cells: 30,
+        seed: 12,
+        ..Default::default()
+    }))
+    .expect("simulates");
+
+    let out = sanity::<f64>(&sim.counts, &sim.cell_totals, None).expect("runs");
+    let ltq = out.log_transcription_quotients();
+
+    assert_eq!(ltq.len(), out.n_genes * out.n_cells);
+    for g in 0..out.n_genes {
+        for c in 0..out.n_cells {
+            let i = g * out.n_cells + c;
+            let expected = out.log_fold_changes[i] + out.mean_log_quotient[g];
+            assert!((ltq[i] - expected).abs() < 1e-12, "gene {g} cell {c}");
+        }
     }
 }
 
