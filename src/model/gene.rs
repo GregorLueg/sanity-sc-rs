@@ -45,7 +45,7 @@ use crate::utils::polygamma::{digamma, trigamma};
 /// Must stay strictly positive. It is also what stops the leading run of
 /// underflowed bins from reaching the Welford update, where the first one would
 /// divide a zero weight by a zero running sum.
-const MARGINALISE_MIN_WEIGHT: f64 = 1e-10;
+pub(crate) const MARGINALISE_MIN_WEIGHT: f64 = 1e-10;
 
 /////////////////
 // GeneScratch //
@@ -186,7 +186,7 @@ fn sweep_grid(
 /// [`SanityErrors::NonFiniteBinLikelihood`] if a bin is unusable. The check is
 /// up front because `fold(NEG_INFINITY, f64::max)` skips a NaN, which would
 /// then propagate silently into every output for the gene.
-fn posterior_weights(log_lik: &[f64], weights: &mut [f64]) -> Result<(), SanityErrors> {
+pub(crate) fn posterior_weights(log_lik: &[f64], weights: &mut [f64]) -> Result<(), SanityErrors> {
     if let Some((bin, &value)) = log_lik.iter().enumerate().find(|(_, l)| !l.is_finite()) {
         return Err(SanityErrors::NonFiniteBinLikelihood { bin, value });
     }
@@ -234,22 +234,8 @@ fn marginalise(
 ) -> GeneSummary {
     // The gene-level scalars do not touch the cells, so they come out of the
     // tiled loop entirely and are accumulated once over the grid.
-    let mut weight_sum = 0.0;
-    let mut mean_offset = 0.0;
-    let mut m2_offset = 0.0;
-    let mut mean_variance = 0.0;
-    for (b, &v) in grid.values.iter().enumerate() {
-        let weight = scratch.weights[b];
-        if weight < MARGINALISE_MIN_WEIGHT {
-            continue;
-        }
-        weight_sum += weight;
-        let share = weight / weight_sum;
-        let delta = scratch.offsets[b] - mean_offset;
-        mean_offset += share * delta;
-        m2_offset += weight * delta * (scratch.offsets[b] - mean_offset);
-        mean_variance += share * (v - mean_variance);
-    }
+    let (summary, weight_sum) =
+        marginal_summary(s, &grid.values, &scratch.weights, &scratch.offsets);
 
     scratch.mean_d[..n_cells].fill(0.0);
     scratch.m2_d[..n_cells].fill(0.0);
@@ -297,11 +283,103 @@ fn marginalise(
         out_error[c] = (scratch.mean_var[c] + scratch.m2_d[c] / weight_sum).sqrt();
     }
 
-    GeneSummary {
+    summary
+}
+
+/// The gene-level summary of the marginalising rule, from the per-bin offsets.
+///
+/// SI eq. 39 and 42 for `m`, its error bar and `<v>`, over the bins that
+/// survive [`MARGINALISE_MIN_WEIGHT`]. Touches no cell.
+///
+/// ### Params
+///
+/// * `s` - `K`, the total UMI count of this gene.
+/// * `grid` - The variance grid.
+/// * `weights` - Posterior weights `W_b`.
+/// * `offsets` - `z(v_b)` per bin.
+///
+/// ### Returns
+///
+/// The summary, and the total weight of the surviving bins.
+pub(crate) fn marginal_summary(
+    s: f64,
+    grid: &[f64],
+    weights: &[f64],
+    offsets: &[f64],
+) -> (GeneSummary, f64) {
+    let mut weight_sum = 0.0;
+    let mut mean_offset = 0.0;
+    let mut m2_offset = 0.0;
+    let mut mean_variance = 0.0;
+    for ((&v, &weight), &z) in grid.iter().zip(weights).zip(offsets) {
+        if weight < MARGINALISE_MIN_WEIGHT {
+            continue;
+        }
+        weight_sum += weight;
+        let share = weight / weight_sum;
+        let delta = z - mean_offset;
+        mean_offset += share * delta;
+        m2_offset += weight * delta * (z - mean_offset);
+        mean_variance += share * (v - mean_variance);
+    }
+    let summary = GeneSummary {
         mean_log_quotient: digamma(s) - mean_offset,
         mean_log_quotient_error: (trigamma(s) + m2_offset / weight_sum).sqrt(),
         variance: mean_variance,
-    }
+    };
+    (summary, weight_sum)
+}
+
+/// Where a collapsing rule evaluates, and the offset it warm starts from.
+///
+/// SPEC section 7. [`VarianceRule::MaxPosterior`] takes the most probable bin
+/// and its offset; [`VarianceRule::PosteriorMean`] takes `<v>`, which lands
+/// between bins, and the offset of the bin nearest it.
+///
+/// ### Params
+///
+/// * `rule` - The collapsing rule; anything but `MaxPosterior` is treated as
+///   `PosteriorMean`.
+/// * `grid` - The variance grid, ascending.
+/// * `weights` - Posterior weights `W_b`.
+/// * `offsets` - `z(v_b)` per bin.
+///
+/// ### Returns
+///
+/// The variance to evaluate at, the offset guess, and the posterior mean `<v>`.
+pub(crate) fn collapse_target(
+    rule: VarianceRule,
+    grid: &[f64],
+    weights: &[f64],
+    offsets: &[f64],
+) -> (f64, f64, f64) {
+    let posterior_mean: f64 = grid.iter().zip(weights).map(|(v, w)| v * w).sum();
+
+    let (v, guess) = match rule {
+        VarianceRule::MaxPosterior => {
+            let best = weights
+                .iter()
+                .enumerate()
+                .fold((0usize, f64::NEG_INFINITY), |acc, (b, &w)| {
+                    if w > acc.1 { (b, w) } else { acc }
+                })
+                .0;
+            (grid[best], offsets[best])
+        }
+        _ => {
+            // The grid ascends, so the first bin at or above `<v>` and the one
+            // below it bracket it; take the closer of the two.
+            let above = grid.partition_point(|&v| v < posterior_mean);
+            let nearest = match above {
+                0 => 0,
+                b if b == grid.len() => b - 1,
+                b if posterior_mean - grid[b - 1] <= grid[b] - posterior_mean => b - 1,
+                b => b,
+            };
+            (posterior_mean, offsets[nearest])
+        }
+    };
+    (v, guess, posterior_mean)
 }
 
 /// Collapse the variance posterior to a single value and evaluate there.
@@ -332,40 +410,8 @@ fn collapse(
     out_fold_change: &mut [f64],
     out_error: &mut [f64],
 ) -> Result<GeneSummary, SanityErrors> {
-    let posterior_mean: f64 = grid
-        .values
-        .iter()
-        .zip(&scratch.weights)
-        .map(|(v, w)| v * w)
-        .sum();
-
-    let (v, guess) = match rule {
-        VarianceRule::MaxPosterior => {
-            let best = scratch
-                .weights
-                .iter()
-                .enumerate()
-                .fold((0usize, f64::NEG_INFINITY), |acc, (b, &w)| {
-                    if w > acc.1 { (b, w) } else { acc }
-                })
-                .0;
-            (grid.values[best], scratch.offsets[best])
-        }
-        _ => {
-            // The grid ascends, so the first bin at or above `<v>` and the one
-            // below it bracket it; take the closer of the two.
-            let above = grid.values.partition_point(|&v| v < posterior_mean);
-            let nearest = match above {
-                0 => 0,
-                b if b == grid.values.len() => b - 1,
-                b if posterior_mean - grid.values[b - 1] <= grid.values[b] - posterior_mean => {
-                    b - 1
-                }
-                b => b,
-            };
-            (posterior_mean, scratch.offsets[nearest])
-        }
-    };
+    let (v, guess, posterior_mean) =
+        collapse_target(rule, &grid.values, &scratch.weights, &scratch.offsets);
 
     let point = solve_stationary(
         v,

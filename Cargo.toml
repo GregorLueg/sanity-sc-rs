@@ -17,7 +17,17 @@ categories = [
 name = "sanity_sc_rs"
 path = "src/lib.rs"
 
+[features]
+## Default build: pure CPU, no GPU runtime.
+default = []
+## Enables the CubeCL/wgpu path in `crate::gpu`.
+gpu = ["cubecl", "cubecl-utils-rs"]
+## Enables the tests that need a wgpu adapter on the machine.
+gpu-tests = ["gpu"]
+
 [dependencies]
+cubecl = { version = "0.10.0", features = ["wgpu"], optional = true }
+cubecl-utils-rs = { version = "0.1.0", optional = true }
 num-traits = "0.2.19"
 rayon = "1.11.0"
 rand = "0.9.2"
@@ -38,3 +48,7 @@ opt-level = 2
 [profile.profiling]
 inherits = "release"
 debug = true
+
+[[example]]
+name = "profile_gpu"
+required-features = ["gpu"]

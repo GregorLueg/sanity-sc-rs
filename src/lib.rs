@@ -30,6 +30,8 @@
 pub mod config;
 pub mod errors;
 pub mod float;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod input;
 pub mod simulate;
 
@@ -204,7 +206,7 @@ pub fn sanity<T: SanityFloat>(
 ///
 /// The variance grid, `ln T_c` per cell and `ln(sum_c T_c)`, or the first
 /// input error found.
-fn prepare_run(
+pub(crate) fn prepare_run(
     counts: &CountMatrix,
     cell_totals: &[f64],
     params: &SanityParams,
