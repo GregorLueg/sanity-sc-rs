@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-/// Everything a caller of `sanity-rs` can be handed back instead of a result.
+/// Everything a caller of `sanity-sc-rs` can be handed back instead of a result.
 #[derive(Debug, Error)]
 pub enum SanityErrors {
     /////////////
@@ -37,9 +37,77 @@ pub enum SanityErrors {
         total: f64,
     },
 
-    //////////////
-    // Solvers  //
-    //////////////
+    #[error(
+        "The gene offsets are malformed: they run from {first} to {last} over {n_stored} stored counts, and must be ascending from zero to that total."
+    )]
+    /// The `indptr` of the count matrix is not a valid ascending offset array.
+    MalformedIndptr {
+        /// First offset seen, or the left edge of the offending pair.
+        first: usize,
+        /// Last offset seen, or the right edge of the offending pair.
+        last: usize,
+        /// Number of stored counts the offsets must cover.
+        n_stored: usize,
+    },
+
+    #[error("The count matrix declares zero cells; there is nothing to condition on.")]
+    /// The matrix has no cell axis at all.
+    NoCells,
+
+    #[error(
+        "Gene {gene} stores cell index {index} after {previous}; a gene's indices must be strictly ascending."
+    )]
+    /// A sparse column is unsorted or names the same cell twice.
+    UnsortedGeneIndices {
+        /// The offending gene.
+        gene: usize,
+        /// The index that broke the order.
+        index: usize,
+        /// The index stored immediately before it.
+        previous: usize,
+    },
+
+    #[error("{n_totals} per-cell totals were supplied for {n_cells} cells.")]
+    /// The vector of library sizes does not match the matrix.
+    CellTotalsLengthMismatch {
+        /// Number of totals supplied.
+        n_totals: usize,
+        /// Number of cells the matrix declares.
+        n_cells: usize,
+    },
+
+    #[error(
+        "The variance grid [{min:e}, {max:e}] over {bins} bins is not usable; bounds must be finite, strictly positive and ascending, with at least one bin."
+    )]
+    /// The requested variance grid cannot be built.
+    InvalidVarianceGrid {
+        /// Lower bound requested.
+        min: f64,
+        /// Upper bound requested.
+        max: f64,
+        /// Bin count requested.
+        bins: usize,
+    },
+
+    #[error(
+        "A fixed variance of {variance:e} was requested; it must be finite and strictly positive."
+    )]
+    /// `VarianceRule::Fixed` was handed a variance the model cannot use.
+    InvalidFixedVariance {
+        /// The variance that was supplied.
+        variance: f64,
+    },
+
+    #[error("Gene {gene} has no counts in any cell; filter such genes out before the run.")]
+    /// Under the `1/alpha` prior a gene with `K = 0` has an improper posterior.
+    EmptyGene {
+        /// The first empty gene found.
+        gene: usize,
+    },
+
+    /////////////
+    // Solvers //
+    /////////////
     #[error(
         "The per-cell fraction solve did not converge in {iterations} iterations; the residual was {residual:e}."
     )]
@@ -49,5 +117,16 @@ pub enum SanityErrors {
         iterations: usize,
         /// Residual at the point of giving up.
         residual: f64,
+    },
+
+    #[error(
+        "Variance bin {bin} produced a log marginal likelihood of {value:e}, which is not finite."
+    )]
+    /// The Laplace approximation returned a value the softmax cannot normalise.
+    NonFiniteBinLikelihood {
+        /// The offending bin.
+        bin: usize,
+        /// The value that was produced.
+        value: f64,
     },
 }
