@@ -18,7 +18,7 @@
 //! The reference implementation (`jmbreda/Sanity`) is GPL-3.0 and is **not** a
 //! source for this crate. Everything here is written from `docs/SPEC.md`, which
 //! restates the mathematics of the paper's Supplementary Information. See
-//! `PROVENANCE.md` for the full position.
+//! `docs/PROVENANCE.md` for the full position.
 //!
 //! # References
 //!
