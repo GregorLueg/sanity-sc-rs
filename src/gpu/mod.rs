@@ -72,14 +72,6 @@ use self::kernels::{marginalise_gpu, sweep_grid_gpu};
 
 /// Target cells per lane in the first pass, which sets how many planes share
 /// one gene.
-///
-/// Measured 2026-09-24 on an M1 Max (32-lane planes), `Marginalise`, wall
-/// clock at 1, 2, 4, 8, 16 and 32 planes per gene. 1998 genes by 20000 cells:
-/// 1.45, 1.22, 1.18, 1.24, 1.58, 2.89 s. 200 genes by 200000 cells: 3.77,
-/// 2.03, 1.24, 1.21, 1.21, 1.36 s, with the worst log fold change falling from
-/// `1.8e-2` of an error bar at one plane to `4e-3` from two planes up. 160
-/// cells per lane picks four planes at 20000 cells and the cap of
-/// [`kernels::MAX_PLANES_PER_GENE`] at 200000.
 const CELLS_PER_LANE: usize = 160;
 
 /// Preferred workgroup width of the second pass, which has no reduction and
@@ -88,15 +80,6 @@ const MARGINALISE_WORKGROUP: u32 = 256;
 
 /// Log-likelihood gap, per cell, below which [`VarianceRule::MaxPosterior`]
 /// treats a bin as tied with the device's best and settles it in `f64`.
-///
-/// The device's error in a gap between two bins' log likelihoods, over the
-/// bins within ten units of the peak, measured 2026-09-24 on an M1 Max with
-/// the anchored offset: at most `2.2e-3` over 100 simulated genes by 20000
-/// cells and `2.8e-2` over 50 by 200000, roughly in proportion to the cells,
-/// as rounding summed over them would be. Two shapes are all that model rests
-/// on. The margin is `4.5x` and `3.6x` those; the in-module tests hold the
-/// error below half of it. Every candidate costs an `f64` offset solve, and at
-/// a flat `0.2` the rule ran 8.5 s against 1.2 s for the grid alone at 20000.
 const MAX_POSTERIOR_TIE_MARGIN_PER_CELL: f64 = 5e-7;
 
 /// The tie margin for a run over `n_cells` cells.
@@ -427,8 +410,8 @@ fn run_marginalise<R: Runtime>(
 /// constant shared by every bin.
 ///
 /// SI eq. 20 and 33, in the rewritten form of the module doc. The dropped
-/// constant is `sum_c k_c ln(k_c T_c / s) - 0.5 sum_{k_c > 0} ln k_c`, which the
-/// softmax ignores.
+/// constant is `sum_c k_c ln(k_c T_c / s) - 0.5 sum_{k_c > 0} ln k_c`, which
+/// the softmax ignores.
 ///
 /// ### Params
 ///
@@ -458,12 +441,13 @@ fn log_marginal(
     sum_d: f64,
 ) -> f64 {
     let log_v = v.ln();
-    // SI eq. 20 has `-s ln(sum_c T_c e^{d_c})`, which is `-s z` only at an exact
-    // root of the offset residual. `f32` stops a few ulp of `z` short, leaving
-    // `sum_c d_c` of order `1e-5 S_A`, and the gap is first order in it:
-    // `sum_c T_c e^{d_c} = e^z (1 - sum_c d_c / (v s))`. Keeping the term makes
-    // the likelihood the objective at the point actually reached, whose error
-    // is second order.
+    // More details here:
+    // SI eq. 20 has `-s ln(sum_c T_c e^{d_c})`, which is `-s z` only at an
+    // exact root of the offset residual. `f32` stops a few ulp of `z` short,
+    // leaving `sum_c d_c` of order `1e-5 S_A`, and the gap is first order in
+    // it: `sum_c T_c e^{d_c} = e^z (1 - sum_c d_c / (v s))`. Keeping the term
+    // makes the likelihood the objective at the point actually reached, whose
+    // error is second order.
     let off_root = -s * (-sum_d / (v * s)).ln_1p();
     let log_star = -0.5 * n_cells * log_v - 0.5 * sum_sq / v + sum_kw + off_root;
     let log_det = curvature.ln() - (v * s).ln() + sum_log1p + n_expressed * log_v - n_cells * log_v;

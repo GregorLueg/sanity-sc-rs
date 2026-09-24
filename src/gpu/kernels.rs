@@ -22,10 +22,6 @@ pub const N_TOTALS: u32 = 5;
 /// Most planes one gene's workgroup may hold, which also sizes the shared
 /// scratch for the cross-plane reduction: `N_TOTALS * MAX_PLANES_PER_GENE`
 /// values, 320 bytes.
-///
-/// Measured 2026-09-24 on an M1 Max: at 200000 cells, 16 planes per gene ran
-/// in 1.21 s and 32 in 1.36 s; at 20000 cells, 32 was 2.4x slower than four.
-/// Nothing measured gained past 16.
 pub const MAX_PLANES_PER_GENE: u32 = 16;
 
 /// Resolution of the anchored offset `zeta`, in ulp of `1 + |zeta|`.
@@ -37,9 +33,7 @@ pub const MAX_PLANES_PER_GENE: u32 = 16;
 /// anchor `a_b = ln(sum_c T_c) + v_b / 2` held by the host in `f64`. `z` is of
 /// order 20, where an `f32` ulp is `2e-6`, and the Laplace determinant is not
 /// stationary in `z`: its slope, `0.5 sum_c omega_c / (1 + omega_c)^2`, runs to
-/// `1e4` for an expressed gene over 200000 cells. Measured 2026-09-24 on two
-/// such genes, solving `z` directly left it `1e-5` off and moved a bin's log
-/// likelihood by `0.17` relative to its neighbour. `zeta` is of order one.
+/// `1e4` for an expressed gene over 200000 cells.
 const OFFSET_ULPS_F32: f32 = 4.0;
 
 /// Iteration cap on the Newton solve for the offset. Same as the CPU's cap: a
@@ -699,8 +693,8 @@ pub fn sweep_grid_gpu<F: Float + CubeElement>(
 
 /// Second pass: integrate each cell's estimate over the kept bins.
 ///
-/// SI eq. 39 and 42, as in `crate::model::gene::marginalise`, with the spread of
-/// `d*_c` across bins accumulated by weighted Welford. Each bin's offset and
+/// SI eq. 39 and 42, as in `crate::model::gene::marginalise`, with the spread
+/// of `d*_c` across bins accumulated by weighted Welford. Each bin's offset and
 /// `S_A` come from [`fn@sweep_grid_gpu`]'s output, still on the device, so no
 /// bin needs solving again. Cells are independent here: one thread per cell,
 /// no reduction and no barrier. A point-estimate rule is the same kernel over
