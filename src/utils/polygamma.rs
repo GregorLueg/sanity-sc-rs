@@ -1,8 +1,8 @@
 //! Digamma and trigamma.
 //!
 //! Needed for the gene's mean log quotient and its error bar (SPEC section 8,
-//! SI eq. 44 and 46). Both are evaluated at `K + 1` where `K` is a gene's total
-//! UMI count, so the argument is an integer that can run from 1 to many
+//! SI eq. 44 and 46). Both are evaluated at `K`, a gene's total UMI count, so
+//! the argument is an integer that can run from 1 to many
 //! millions. The implementations here are for general positive real arguments;
 //! that costs nothing and makes them testable against `Rscript`.
 //!
@@ -33,7 +33,7 @@ const POLYGAMMA_SHIFT: f64 = 12.0;
 /// ### Returns
 ///
 /// `psi(x)`. Non-positive arguments return NaN; this crate only ever calls it
-/// with `K + 1 >= 1`.
+/// with `K >= 1`.
 pub(crate) fn digamma(x: f64) -> f64 {
     if !x.is_finite() || x <= 0.0 {
         return f64::NAN;

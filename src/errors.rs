@@ -98,6 +98,13 @@ pub enum SanityErrors {
         variance: f64,
     },
 
+    #[error("Gene {gene} has no counts in any cell; filter such genes out before the run.")]
+    /// Under the `1/alpha` prior a gene with `K = 0` has an improper posterior.
+    EmptyGene {
+        /// The first empty gene found.
+        gene: usize,
+    },
+
     /////////////
     // Solvers //
     /////////////

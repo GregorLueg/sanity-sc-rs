@@ -124,7 +124,7 @@ pub fn sanity<T: SanityFloat>(
     let params = params.unwrap_or_default();
     let n_cells = counts.n_cells();
     let n_genes = counts.n_genes();
-    let (grid, log_totals, log_total_sum) = prepare_run(n_cells, cell_totals, &params)?;
+    let (grid, log_totals, log_total_sum) = prepare_run(counts, cell_totals, &params)?;
 
     let mut log_fold_changes = vec![T::zero(); n_genes * n_cells];
     let mut error_bars = vec![T::zero(); n_genes * n_cells];
@@ -196,7 +196,7 @@ pub fn sanity<T: SanityFloat>(
 ///
 /// ### Params
 ///
-/// * `n_cells` - Number of cells in the count matrix.
+/// * `counts` - The count matrix; checked for genes with no counts.
 /// * `cell_totals` - Total UMI count of every cell.
 /// * `params` - Resolved run parameters.
 ///
@@ -205,10 +205,14 @@ pub fn sanity<T: SanityFloat>(
 /// The variance grid, `ln T_c` per cell and `ln(sum_c T_c)`, or the first
 /// input error found.
 fn prepare_run(
-    n_cells: usize,
+    counts: &CountMatrix,
     cell_totals: &[f64],
     params: &SanityParams,
 ) -> Result<(VarianceGrid, Vec<f64>, f64), SanityErrors> {
+    let n_cells = counts.n_cells();
+    if let Some(gene) = (0..counts.n_genes()).find(|&g| counts.gene(g).1.iter().all(|&k| k == 0)) {
+        return Err(SanityErrors::EmptyGene { gene });
+    }
     if cell_totals.len() != n_cells {
         return Err(SanityErrors::CellTotalsLengthMismatch {
             n_totals: cell_totals.len(),
@@ -316,7 +320,7 @@ where
 {
     let params = params.unwrap_or_default();
     let n_cells = counts.n_cells();
-    let (grid, log_totals, log_total_sum) = prepare_run(n_cells, cell_totals, &params)?;
+    let (grid, log_totals, log_total_sum) = prepare_run(counts, cell_totals, &params)?;
 
     let n_bins = grid.len();
     let kept: Vec<Option<KeptGene<T>>> = (0..counts.n_genes())

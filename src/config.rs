@@ -24,7 +24,8 @@ pub const DEFAULT_VARIANCE_MAX: f64 = 50.0;
 
 /// Number of bins, equally spaced in `ln v`.
 ///
-/// Measured 2026-09-13. Refining the grid along a `2^k + 1` ladder, so that each
+/// Measured 2026-09-13, under the earlier `s = K + 1` prior (SPEC section 1);
+/// not yet re-measured under `s = K`. Refining the grid along a `2^k + 1` ladder, so that each
 /// finer grid contains every point of the coarser ones, 161 is the coarsest rung
 /// at which a further doubling moves every estimate by less than 1% of the error
 /// bar the method itself reports for that estimate. Checked on 500 simulated

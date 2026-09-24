@@ -126,7 +126,7 @@ impl GeneScratch {
 ///
 /// ### Params
 ///
-/// * `s` - `K + 1` for this gene.
+/// * `s` - `K`, the total UMI count of this gene.
 /// * `log_totals` - `ln T_c` for every cell.
 /// * `log_total_sum` - `ln(sum_c T_c)`.
 /// * `grid` - The variance grid.
@@ -212,7 +212,7 @@ fn posterior_weights(log_lik: &[f64], weights: &mut [f64]) -> Result<(), SanityE
 ///
 /// ### Params
 ///
-/// * `s` - `K + 1` for this gene.
+/// * `s` - `K`, the total UMI count of this gene.
 /// * `log_totals` - `ln T_c` for every cell.
 /// * `grid` - The variance grid.
 /// * `scratch` - Per-thread scratch.
@@ -313,7 +313,7 @@ fn marginalise(
 /// ### Params
 ///
 /// * `rule` - The collapsing rule.
-/// * `s` - `K + 1` for this gene.
+/// * `s` - `K`, the total UMI count of this gene.
 /// * `log_totals` - `ln T_c` for every cell.
 /// * `grid` - The variance grid.
 /// * `scratch` - Per-thread scratch.
@@ -487,7 +487,9 @@ pub(crate) fn run_gene(
         scratch.counts[i as usize] = k as f64;
         total_counts += k as f64;
     }
-    let s = total_counts + 1.0;
+    // SPEC section 1: the 1/alpha prior makes the exponent K, not K + 1.
+    // `prepare_run` rejects K = 0, where the posterior is improper.
+    let s = total_counts;
 
     let summary = match params.variance_rule {
         VarianceRule::Fixed(v) => {

@@ -46,6 +46,7 @@ fn main() {
 
     let start = Instant::now();
     let sim = simulate(Some(sim_params)).expect("the simulation parameters are valid");
+    let n_genes = sim.counts.n_genes();
     let nnz: usize = (0..n_genes).map(|g| sim.counts.gene(g).0.len()).sum();
     println!(
         "simulated {n_genes} genes x {n_cells} cells, {nnz} stored counts ({:.1}% dense), {:.2} s",

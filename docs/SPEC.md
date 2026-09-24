@@ -17,7 +17,7 @@ is citing a reference rather than copying a line. Mapping:
 | `C` | `C` | number of cells |
 | `k_c` | `n_gc` | UMI count of this gene in cell `c` |
 | `K` | `n_g` | `sum_c k_c`, total UMIs for this gene |
-| `s` | `n_g + 1` | `K + 1`; appears in every stationarity term |
+| `s` | `n_g + 1` | `K`; appears in every stationarity term. The SI's `n_g + 1` comes from a flat prior on `alpha`; see section 1 |
 | `T_c` | `N_c` | total UMIs in cell `c`, over all genes |
 | `v` | `v_g` | variance of the log fold changes for this gene |
 | `d_c` | `delta_gc` | log fold change of this gene in cell `c` |
@@ -47,8 +47,8 @@ Write the quotient as a gene mean times a per-cell log fold change,
 
     alpha_c = alpha * exp(d_c)
 
-Marginalising `alpha` out under a uniform prior (`SI (16)`; the integral is
-extended from `[0, 1]` to `[0, inf)`, which costs a relative error of order
+Marginalising `alpha` out under the scale prior `1/alpha` (the integral is
+taken over `[0, inf)`, which costs a relative error of order
 `N^{-N(1 - K/N)}` and is negligible unless one gene holds nearly all UMIs) and
 imposing a zero-mean Gaussian prior of variance `v` on the `d_c` (`SI (17)`,
 maximum entropy given a variance) gives the log posterior up to a constant:
@@ -57,6 +57,21 @@ maximum entropy given a variance) gives the log posterior up to a constant:
               - (1 / (2 v)) sum_c d_c^2
               + sum_c k_c d_c
               - s ln( sum_c T_c exp(d_c) )                              SI (20)
+
+with `s = K`. `SI (16)` uses a uniform prior on `alpha` instead, which gives
+`s = K + 1`. This crate deliberately departs from it. `alpha` is a scale, and the
+uniform prior is not scale invariant: under it `ln P(k | v)` carries a `-v/2`
+tilt even for a gene with no information about `v`, which drags `<v>` for sparse
+genes to the bottom of the grid (about 0.28 for a one-UMI gene against a
+log-uniform prior mean of 4.75). Measured 2026-09-24 on 500 simulated genes by
+2000 cells: under `s = K + 1` the per-cell error bars of the 100 sparsest genes
+were too narrow by a median factor of 2.2 against the simulated truth, under
+`s = K` too wide by a factor of 0.57, with the point estimates equally good. The
+reference binary's output matches `s = K` to three decimals in `<v>`.
+
+The cost is that `K = 0` has an improper posterior: `psi(0)` diverges (section 8)
+and `v s = 0` breaks the solve of section 2. Such a gene carries no information,
+and the entry points reject it with `SanityErrors::EmptyGene`.
 
 Inputs are raw UMI counts. Anything already log-normalised breaks the Poisson
 term outright.
@@ -187,7 +202,8 @@ across fourteen gene profiles spanning `C` from 100 to 2000 and `K` from 3 to
 10069. The bias is one-signed and bounded: 0 to -23%, median -12%. It vanishes
 at high coverage (-0.0% at 20 UMIs per cell) and is worst for genes whose counts
 sit in a small fraction of cells, where the per-cell posterior is most
-asymmetric and least Gaussian.
+asymmetric and least Gaussian. Measured under `s = K + 1`, before the prior
+change of section 1; not yet re-measured under `s = K`.
 
 This is left uncorrected. The bias only bites genes carrying almost no
 information about `v` in the first place (SI S3.8), and the obvious fix does not
@@ -233,13 +249,14 @@ Compute in log space: subtract `max_b L_b` before exponentiating.
 dated provenance in their doc comments. They are not taken from the reference
 implementation. `B = 161` is the coarsest rung of a `2^k + 1` refinement ladder
 at which doubling the grid moves every estimate by under 1% of its own reported
-error bar (measured 2026-09-13). Section 7's `MaxPosterior` is exempt: it does
+error bar (measured 2026-09-13, under `s = K + 1`; not yet re-measured under
+`s = K`). Section 7's `MaxPosterior` is exempt: it does
 not converge under refinement at any `B`.
 
 The gene's variance estimate is the posterior mean, `<v> = sum_b W_b v_b`. For
-very lowly expressed genes this is small even when the true variance is large;
-that is the correct behaviour, not a defect, because the variation lies below the
-detection limit (SI S3.8).
+very lowly expressed genes the data say little about `v` and `<v>` stays near the
+prior mean over the grid; the wide error bars that follow are the honest answer,
+because the variation lies below the detection limit (SI S3.8).
 
 ## 6. Aggregation over `v`
 
@@ -284,19 +301,19 @@ needs the second pass; the others need two vectors of length `C`.
 
 ## 8. Mean expression and its error bar
 
-`SI (43)-(47)`. At fixed `v` the posterior over the gene mean is a gamma in
-`alpha`, giving
+`SI (43)-(47)`, with `K` in place of the SI's `K + 1` (section 1). At fixed `v`
+the posterior over the gene mean is a gamma in `alpha` of shape `K`, giving
 
-    <ln alpha>_v = psi(K + 1) - z(v)                                    SI (44)
-    var(ln alpha)_v = psi1(K + 1)      (independent of v)               SI (46)
+    <ln alpha>_v = psi(K) - z(v)                                        SI (44)
+    var(ln alpha)_v = psi1(K)      (independent of v)                   SI (46)
 
 so, averaging over the grid,
 
-    m     = psi(K + 1) - sum_b W_b z_b                                  SI (45)
-    dm^2  = psi1(K + 1) + sum_b W_b (z_b - <z>)^2                       SI (47)
+    m     = psi(K) - sum_b W_b z_b                                      SI (45)
+    dm^2  = psi1(K) + sum_b W_b (z_b - <z>)^2                           SI (47)
 
 `psi` is the digamma function and `psi1` the trigamma. `K` is an integer, so
-`psi(K + 1) = -gamma + sum_{j=1..K} 1/j`; the harmonic form is exact for small
+`psi(K) = -gamma + sum_{j=1..K-1} 1/j`; the harmonic form is exact for small
 `K` and the asymptotic expansion takes over above a threshold that is ours to
 set and is checked against `Rscript -e 'digamma(...)'`. Reference values are
 never written from memory.

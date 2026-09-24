@@ -174,6 +174,9 @@ fn draw_log_fold_changes(
 }
 
 /// A simulated dataset and the truth behind it.
+///
+/// Genes that caught no UMI in any cell are dropped, so there may be fewer
+/// genes than [`SimulationParams::n_genes`]; every field follows the kept genes.
 #[derive(Clone, Debug)]
 pub struct Simulation {
     /// The sampled UMI counts, gene-major sparse.
@@ -236,8 +239,10 @@ pub fn simulate(params: Option<SimulationParams>) -> Result<Simulation, SanityEr
     let mut indptr = Vec::with_capacity(params.n_genes + 1);
     indptr.push(0usize);
     let mut cell_totals = vec![0.0f64; params.n_cells];
+    let mut kept = Vec::with_capacity(params.n_genes);
 
     for g in 0..params.n_genes {
+        let start = indices.len();
         let shift = mean_log_quotient[g] - 0.5 * variance[g];
         let row = &log_fold_changes[g * params.n_cells..(g + 1) * params.n_cells];
         for (c, &d) in row.iter().enumerate() {
@@ -255,7 +260,12 @@ pub fn simulate(params: Option<SimulationParams>) -> Result<Simulation, SanityEr
                 cell_totals[c] += k;
             }
         }
-        indptr.push(indices.len());
+        // `sanity` rejects a gene with no counts (SPEC section 1), so the
+        // simulator does not hand one out.
+        if indices.len() > start {
+            indptr.push(indices.len());
+            kept.push(g);
+        }
     }
 
     // A cell that caught nothing cannot be conditioned on; give it the floor of
@@ -266,12 +276,20 @@ pub fn simulate(params: Option<SimulationParams>) -> Result<Simulation, SanityEr
         }
     }
 
+    let n_cells = params.n_cells;
     Ok(Simulation {
-        counts: CountMatrix::new(indices, values, indptr, params.n_cells)?,
+        counts: CountMatrix::new(indices, values, indptr, n_cells)?,
         cell_totals,
-        mean_log_quotient,
-        variance,
-        log_fold_changes,
+        mean_log_quotient: kept.iter().map(|&g| mean_log_quotient[g]).collect(),
+        variance: kept.iter().map(|&g| variance[g]).collect(),
+        log_fold_changes: kept
+            .iter()
+            .flat_map(|&g| {
+                log_fold_changes[g * n_cells..(g + 1) * n_cells]
+                    .iter()
+                    .copied()
+            })
+            .collect(),
     })
 }
 
@@ -307,9 +325,12 @@ mod tests {
             n_genes: 500,
             n_cells: 10,
             seed: 3,
+            // Large enough that no gene comes back empty and gets dropped.
+            library_size: 1e9,
             ..Default::default()
         }))
         .expect("simulates");
+        assert_eq!(sim.variance.len(), 500);
         let total: f64 = sim.mean_log_quotient.iter().map(|m| m.exp()).sum();
         assert_relative_eq!(total, 1.0, max_relative = 1e-12);
     }

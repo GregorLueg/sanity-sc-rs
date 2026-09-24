@@ -152,7 +152,7 @@ def run_gene(counts, totals, grid):
     counts = counts.astype(np.float64)
     log_totals = np.log(totals)
     log_total_sum = np.log(totals.sum())
-    s = counts.sum() + 1.0
+    s = counts.sum()  # SPEC section 1: 1/alpha prior, exponent K
 
     offsets = np.empty(grid.size)
     log_lik = np.empty(grid.size)
@@ -181,8 +181,8 @@ def run_gene(counts, totals, grid):
 
     k = int(round(counts.sum()))
     mean_offset = float(np.sum(weights * offsets))
-    m = digamma_int(k) - mean_offset
-    dm = np.sqrt(trigamma_int(k) + np.sum(weights * (offsets - mean_offset) ** 2))
+    m = digamma_int(k - 1) - mean_offset  # psi(K)
+    dm = np.sqrt(trigamma_int(k - 1) + np.sum(weights * (offsets - mean_offset) ** 2))
     return mean_d, error, m, float(dm), float(np.sum(weights * grid))
 
 
@@ -213,6 +213,9 @@ def main():
     args = parser.parse_args()
 
     counts, totals = simulate(args.genes, args.cells, args.seed)
+    # K = 0 genes have an improper posterior and the crate rejects them.
+    counts = counts[counts.sum(axis=1) > 0]
+    args.genes = counts.shape[0]
     grid = np.exp(np.linspace(np.log(args.v_min), np.log(args.v_max), args.v_bins))
 
     lines = [

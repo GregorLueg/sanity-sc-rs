@@ -83,7 +83,7 @@ const OFFSET_BRACKET_STEP_COLD: f64 = 1.0;
 pub(crate) struct Stationary {
     /// The variance this point was solved at.
     pub v: f64,
-    /// `K + 1`, the total UMI count of the gene plus one.
+    /// `K`, the total UMI count of the gene.
     pub s: f64,
     /// `ln(v s)`, cached because every per-cell quantity needs it.
     pub log_vs: f64,
@@ -226,7 +226,7 @@ fn evaluate(
 /// ### Params
 ///
 /// * `v` - The variance bin.
-/// * `s` - `K + 1` for this gene.
+/// * `s` - `K`, the total UMI count of this gene.
 /// * `counts` - Dense UMI counts for this gene, length `n_cells`.
 /// * `log_totals` - `ln T_c` for every cell, length `n_cells`.
 /// * `guess` - Starting offset. Pass the previous bin's solution when sweeping

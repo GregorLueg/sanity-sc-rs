@@ -240,13 +240,13 @@ fn test_log_transcription_quotients_add_the_gene_mean() {
 }
 
 #[test]
-fn test_degenerate_genes_stay_finite() {
+fn test_single_umi_gene_stays_finite() {
     use sanity_rs::input::CountMatrix;
 
-    // Gene 0 has no counts anywhere; gene 1 appears in a single cell. Neither
-    // carries information, so both should come back with wide error bars rather
-    // than a NaN or a solver failure.
-    let counts = CountMatrix::new(vec![2], vec![5], vec![0, 0, 1], 4).expect("well formed");
+    // A single UMI in a single cell carries no information about the variance,
+    // so the gene should come back with wide error bars rather than a NaN or a
+    // solver failure.
+    let counts = CountMatrix::new(vec![2], vec![1], vec![0, 1], 4).expect("well formed");
     let out = sanity::<f64>(&counts, &[100.0, 200.0, 300.0, 50.0], None).expect("runs");
 
     assert!(out.log_fold_changes.iter().all(|x| x.is_finite()));
@@ -256,7 +256,17 @@ fn test_degenerate_genes_stay_finite() {
 
     // With nothing to go on the variance posterior stays near the prior, which
     // over a log-uniform grid to 50 has a mean well above one.
-    assert!(out.variance[0] > 1.0, "empty gene variance {}", out.variance[0]);
+    assert!(out.variance[0] > 1.0, "single UMI gene variance {}", out.variance[0]);
+}
+
+#[test]
+fn test_rejects_a_gene_with_no_counts() {
+    use sanity_rs::errors::SanityErrors;
+    use sanity_rs::input::CountMatrix;
+
+    let counts = CountMatrix::new(vec![2], vec![5], vec![0, 1, 1], 4).expect("well formed");
+    let err = sanity::<f64>(&counts, &[100.0, 200.0, 300.0, 50.0], None).unwrap_err();
+    assert!(matches!(err, SanityErrors::EmptyGene { gene: 1 }));
 }
 
 #[test]
