@@ -120,15 +120,15 @@ const EXPM1_SERIES_MAX: f32 = 0.5;
 /// `ln r`.
 #[cube]
 fn ln_near_one<F: Float>(y: F, r: F) -> F {
-    let one = F::new(1.0);
+    let one = F::new(1.0_f32);
     let mut out = F::ln(r);
     if F::abs(y) < F::new(LOG1P_SERIES_MAX) {
-        let u = y / (F::new(2.0) + y);
+        let u = y / (F::new(2.0_f32) + y);
         let u2 = u * u;
-        let tail = F::new(1.0 / 11.0) * u2 + F::new(1.0 / 9.0);
-        let tail = tail * u2 + F::new(1.0 / 7.0);
-        let tail = tail * u2 + F::new(1.0 / 5.0);
-        let tail = tail * u2 + F::new(1.0 / 3.0);
+        let tail = F::new(1.0_f32 / 11.0_f32) * u2 + F::new(1.0_f32 / 9.0_f32);
+        let tail = tail * u2 + F::new(1.0_f32 / 7.0_f32);
+        let tail = tail * u2 + F::new(1.0_f32 / 5.0_f32);
+        let tail = tail * u2 + F::new(1.0_f32 / 3.0_f32);
         out = F::new(2.0) * u * (tail * u2 + one);
     }
     out
@@ -145,7 +145,7 @@ fn ln_near_one<F: Float>(y: F, r: F) -> F {
 /// `ln(1 + y)`.
 #[cube]
 fn log1p<F: Float>(y: F) -> F {
-    ln_near_one::<F>(y, F::new(1.0) + y)
+    ln_near_one::<F>(y, F::new(1.0_f32) + y)
 }
 
 /// `exp(x) - 1` for `x >= 0`, accurate for small `x`.
@@ -159,17 +159,17 @@ fn log1p<F: Float>(y: F) -> F {
 /// `exp(x) - 1`.
 #[cube]
 fn expm1<F: Float>(x: F) -> F {
-    let one = F::new(1.0);
+    let one = F::new(1.0_f32);
     let mut out = F::exp(x) - one;
     if x < F::new(EXPM1_SERIES_MAX) {
-        let mut acc = one + x / F::new(9.0);
-        acc = one + x / F::new(8.0) * acc;
-        acc = one + x / F::new(7.0) * acc;
-        acc = one + x / F::new(6.0) * acc;
-        acc = one + x / F::new(5.0) * acc;
-        acc = one + x / F::new(4.0) * acc;
-        acc = one + x / F::new(3.0) * acc;
-        acc = one + x / F::new(2.0) * acc;
+        let mut acc = one + x / F::new(9.0_f32);
+        acc = one + x / F::new(8.0_f32) * acc;
+        acc = one + x / F::new(7.0_f32) * acc;
+        acc = one + x / F::new(6.0_f32) * acc;
+        acc = one + x / F::new(5.0_f32) * acc;
+        acc = one + x / F::new(4.0_f32) * acc;
+        acc = one + x / F::new(3.0_f32) * acc;
+        acc = one + x / F::new(2.0_f32) * acc;
         out = x * acc;
     }
     out
@@ -190,8 +190,8 @@ fn expm1<F: Float>(x: F) -> F {
 /// `t = ln omega(x)`.
 #[cube]
 fn log_omega<F: Float>(x: F) -> F {
-    let one = F::new(1.0);
-    let two = F::new(2.0);
+    let one = F::new(1.0_f32);
+    let two = F::new(2.0_f32);
     let mut t = x;
     if x > F::new(OMEGA_LARGE_X) {
         t = F::ln(x - F::ln(x));
@@ -206,7 +206,7 @@ fn log_omega<F: Float>(x: F) -> F {
         let d1 = e + one;
         let halley = two * d1 * d1 - g * e;
         let mut step = g / d1;
-        if halley > F::new(0.0) {
+        if halley > F::new(0.0_f32) {
             step = two * g * d1 / halley;
         }
         t -= step;
@@ -229,7 +229,7 @@ fn log_omega<F: Float>(x: F) -> F {
 #[cube]
 fn omega_from_log<F: Float>(x: F, t: F) -> F {
     let mut w = x - t;
-    if x <= F::new(0.0) {
+    if x <= F::new(0.0_f32) {
         w = F::exp(t);
     }
     w
@@ -261,7 +261,7 @@ fn omega_from_log<F: Float>(x: F, t: F) -> F {
 #[cube]
 #[allow(clippy::too_many_arguments)]
 fn log_fold_change<F: Float>(k: F, x: F, t: F, w: F, v: F, lt: F, shift: F) -> F {
-    let zero = F::new(0.0);
+    let zero = F::new(0.0_f32);
     let mut d = v * k - w;
     if k > zero && x > zero {
         d = t - lt - shift;
@@ -321,8 +321,8 @@ fn sweep<F: Float>(
     shift: F,
     tot: &mut Array<F>,
 ) {
-    let zero = F::new(0.0);
-    let one = F::new(1.0);
+    let zero = F::new(0.0_f32);
+    let one = F::new(1.0_f32);
     let mut sum_d = zero;
     let mut curvature = zero;
     let mut sum_sq = zero;
@@ -400,7 +400,7 @@ fn sweep<F: Float>(
 /// The drop in log posterior minus one half; its root is the error bar.
 #[cube]
 fn half_unit_drop<F: Float>(sigma: F, d: F, v: F, s: F, wn: F) -> F {
-    let two = F::new(2.0);
+    let two = F::new(2.0_f32);
     sigma * (two * d + sigma) / (two * v) + s * log1p::<F>(wn * expm1::<F>(sigma))
         - F::new(HALF_UNIT_DROP)
 }
@@ -422,8 +422,8 @@ fn half_unit_drop<F: Float>(sigma: F, d: F, v: F, s: F, wn: F) -> F {
 /// `sigma^2`.
 #[cube]
 fn empty_cell_variance<F: Float>(d: F, w: F, v: F, s: F) -> F {
-    let one = F::new(1.0);
-    let zero = F::new(0.0);
+    let one = F::new(1.0_f32);
+    let zero = F::new(0.0_f32);
     let wn = w / (v * s);
     let seed = F::sqrt(v / (one + w));
 
@@ -432,7 +432,7 @@ fn empty_cell_variance<F: Float>(d: F, w: F, v: F, s: F) -> F {
     let mut brackets = 0u32;
     while half_unit_drop::<F>(hi, d, v, s, wn) < zero {
         lo = hi;
-        hi *= F::new(2.0);
+        hi *= F::new(2.0_f32);
         brackets += 1u32;
         // Past the largest finite `f32` the drop has overflowed to infinity and
         // the bisection below still converges.
@@ -464,7 +464,7 @@ fn empty_cell_variance<F: Float>(d: F, w: F, v: F, s: F) -> F {
         if next > lo && next < hi {
             sigma = next;
         } else {
-            sigma = (lo + hi) * F::new(0.5);
+            sigma = (lo + hi) * F::new(0.5_f32);
         }
         i += 1u32;
     }
@@ -486,7 +486,7 @@ fn empty_cell_variance<F: Float>(d: F, w: F, v: F, s: F) -> F {
 /// The Gaussian posterior variance of `d_c`.
 #[cube]
 fn gaussian_variance<F: Float>(v: F, w: F, curvature: F) -> F {
-    let one = F::new(1.0);
+    let one = F::new(1.0_f32);
     let one_plus = one + w;
     (v / one_plus) * (one + w * w / (one_plus * curvature))
 }
@@ -550,8 +550,8 @@ pub fn sweep_grid_gpu<F: Float + CubeElement>(
     let lead = UNIT_POS_X == 0u32;
     let mut partials = SharedMemory::<F>::new((N_TOTALS * MAX_PLANES_PER_GENE) as usize);
     let row = gene * n_cells;
-    let zero = F::new(0.0);
-    let one = F::new(1.0);
+    let zero = F::new(0.0_f32);
+    let one = F::new(1.0_f32);
 
     // `z` below is the anchored offset `zeta = z - a_b`; see [`OFFSET_ULPS_F32`].
     let mut z = gene_scalars[(n_genes + gene) as usize];
@@ -616,7 +616,7 @@ pub fn sweep_grid_gpu<F: Float + CubeElement>(
             } else {
                 hi = lo;
             }
-            step *= F::new(2.0);
+            step *= F::new(2.0_f32);
             n_bracket += 1u32;
             if n_bracket > OFFSET_MAX_BRACKET {
                 failed = 1u32;
@@ -649,7 +649,7 @@ pub fn sweep_grid_gpu<F: Float + CubeElement>(
                 if next > lo && next < hi {
                     z = next;
                 } else {
-                    z = (lo + hi) * F::new(0.5);
+                    z = (lo + hi) * F::new(0.5_f32);
                 }
                 sweep::<F>(
                     counts,
@@ -740,7 +740,7 @@ pub fn marginalise_gpu<F: Float + CubeElement>(
     if gene >= n_genes || c >= n_cells {
         terminate!();
     }
-    let zero = F::new(0.0);
+    let zero = F::new(0.0_f32);
 
     let k = counts[(gene * n_cells + c) as usize];
     let lt = log_totals[c as usize];
