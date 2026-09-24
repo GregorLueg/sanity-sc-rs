@@ -37,6 +37,6 @@ At scale, 1998 genes by 20 000 cells (2000 requested), library size 500,
 Our split: parse 0.26 s, compute 114.2 s, write 6.9 s. The harness's extra copy
 for `log_transcription_quotients` is 320 MB of our peak.
 
-In both runs the outputs agree: per-gene correlation of the log transcription quotients and of
-their error bars is 1.0000 on every gene, and the largest absolute difference
-in log transcription quotient is below `5e-4`.
+In both runs the outputs agree: per-gene correlation of the log transcription
+quotients and of their error bars is 1.0000 on every gene, and the largest
+absolute difference in log transcription quotient is below `5e-4`.
