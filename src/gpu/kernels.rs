@@ -1,7 +1,8 @@
 //! The two device kernels and their per-cell helpers.
 //!
-//! [`fn@sweep_grid_gpu`] is the first pass: one plane per gene, running the whole
-//! variance grid with the offset solve inside the plane. [`fn@marginalise_gpu`]
+//! [`fn@sweep_grid_gpu`] is the first pass: one workgroup of whole planes per
+//! gene, running the whole variance grid with the offset solve inside the
+//! workgroup. [`fn@marginalise_gpu`]
 //! is the second pass: one thread per gene and cell, integrating over the bins
 //! the host kept. Everything is `f32`; see the [`crate::gpu`] module doc for
 //! where that costs precision and how the arithmetic is arranged around it.
@@ -14,6 +15,18 @@ use cubecl::prelude::*;
 ////////////
 // Consts //
 ////////////
+
+/// Totals one sweep reduces; see [`sweep`].
+pub const N_TOTALS: u32 = 5;
+
+/// Most planes one gene's workgroup may hold, which also sizes the shared
+/// scratch for the cross-plane reduction: `N_TOTALS * MAX_PLANES_PER_GENE`
+/// values, 320 bytes.
+///
+/// Measured 2026-09-24 on an M1 Max: at 200000 cells, 16 planes per gene ran
+/// in 1.21 s and 32 in 1.36 s; at 20000 cells, 32 was 2.4x slower than four.
+/// Nothing measured gained past 16.
+pub const MAX_PLANES_PER_GENE: u32 = 16;
 
 /// Resolution of the offset, in ulp of `1 + |z|`.
 ///
@@ -257,10 +270,17 @@ fn log_fold_change<F: Float>(k: F, x: F, t: F, w: F, v: F, lt: F, shift: F) -> F
     d
 }
 
-/// One sweep of a gene over its cells at a given offset, reduced over the plane.
+/// One sweep of a gene over its cells at a given offset, reduced over the
+/// workgroup.
 ///
-/// Every lane receives the same five totals, so every lane of the plane takes
-/// the same branch in the offset solve with no barrier.
+/// Each lane strides the cells by the workgroup width. The partials are summed
+/// within each plane, then across planes through shared memory in plane order,
+/// so every thread receives bit-identical totals and takes the same branch in
+/// the offset solve; the barriers therefore sit in uniform control flow.
+///
+/// Spreading a gene over several planes is as much for precision as for
+/// occupancy: each lane's partial is a sequential `f32` sum, and its rounding
+/// grows with the number of cells it walks.
 ///
 /// Every total is a sum of terms of order one per cell, by three exact
 /// identities that all follow from the stationarity condition
@@ -284,7 +304,7 @@ fn log_fold_change<F: Float>(k: F, x: F, t: F, w: F, v: F, lt: F, shift: F) -> F
 /// * `log_totals` - `ln T_c` per cell.
 /// * `row` - Start of this gene's row in `counts`.
 /// * `n_cells` - Number of cells.
-/// * `lane` - This lane's index within the plane.
+/// * `partials` - Shared scratch, [`N_TOTALS`]` * `[`MAX_PLANES_PER_GENE`].
 /// * `v` - The variance bin.
 /// * `shift` - `ln(v s) - z`.
 /// * `tot` - Output, five totals: `sum d`, `S_A = sum omega / (1 + omega)`,
@@ -297,7 +317,7 @@ fn sweep<F: Float>(
     log_totals: &Tensor<F>,
     row: u32,
     n_cells: u32,
-    lane: u32,
+    partials: &mut SharedMemory<F>,
     v: F,
     shift: F,
     tot: &mut Array<F>,
@@ -310,7 +330,7 @@ fn sweep<F: Float>(
     let mut sum_kw = zero;
     let mut sum_log1p = zero;
 
-    let mut c = lane;
+    let mut c = UNIT_POS_X;
     while c < n_cells {
         let k = counts[(row + c) as usize];
         let lt = log_totals[c as usize];
@@ -328,14 +348,42 @@ fn sweep<F: Float>(
         } else {
             sum_log1p += log1p::<F>(w);
         }
-        c += PLANE_DIM;
+        c += CUBE_DIM_X;
     }
 
-    tot[0] = plane_sum(sum_d);
-    tot[1] = plane_sum(curvature);
-    tot[2] = plane_sum(sum_sq);
-    tot[3] = plane_sum(sum_kw);
-    tot[4] = plane_sum(sum_log1p);
+    let plane_d = plane_sum(sum_d);
+    let plane_curvature = plane_sum(curvature);
+    let plane_sq = plane_sum(sum_sq);
+    let plane_kw = plane_sum(sum_kw);
+    let plane_log1p = plane_sum(sum_log1p);
+    // The plane's own id, never `UNIT_POS_X / PLANE_DIM`: nothing obliges a
+    // driver to lay subgroups out contiguously.
+    if UNIT_POS_PLANE == 0u32 {
+        partials[(PLANE_POS * N_TOTALS) as usize] = plane_d;
+        partials[(PLANE_POS * N_TOTALS + 1u32) as usize] = plane_curvature;
+        partials[(PLANE_POS * N_TOTALS + 2u32) as usize] = plane_sq;
+        partials[(PLANE_POS * N_TOTALS + 3u32) as usize] = plane_kw;
+        partials[(PLANE_POS * N_TOTALS + 4u32) as usize] = plane_log1p;
+    }
+    sync_cube();
+
+    let n_planes = CUBE_DIM_X / PLANE_DIM;
+    let mut q = 0u32;
+    while q < N_TOTALS {
+        tot[q as usize] = zero;
+        q += 1u32;
+    }
+    let mut p = 0u32;
+    while p < n_planes {
+        let mut q = 0u32;
+        while q < N_TOTALS {
+            tot[q as usize] += partials[(p * N_TOTALS + q) as usize];
+            q += 1u32;
+        }
+        p += 1u32;
+    }
+    // Nobody may overwrite the partials until every thread has read them.
+    sync_cube();
 }
 
 /// The half-unit drop of SI eq. 38 at a trial `sigma`, minus the half unit.
@@ -452,9 +500,10 @@ fn gaussian_variance<F: Float>(v: F, w: F, curvature: F) -> F {
 ///
 /// SI eq. 27 per bin, with the same bracket-then-Newton solve as
 /// `crate::model::fractions::solve_stationary`, warm started from the previous
-/// bin's offset. One plane owns one gene and every lane runs the whole bin loop
-/// on identical plane-reduced totals, so the lanes never disagree about the
-/// next step and no barrier is needed. The plane width is read at run time.
+/// bin's offset. One workgroup owns one gene and every thread runs the whole
+/// bin loop on identical reduced totals, so the threads never disagree about
+/// the next step. The plane width is read at run time; the workgroup may hold
+/// any whole number of planes up to [`MAX_PLANES_PER_GENE`].
 ///
 /// The log marginal likelihood itself is assembled on the host in `f64`: this
 /// kernel returns only its bin-dependent pieces, none of which cancel.
@@ -467,7 +516,8 @@ fn gaussian_variance<F: Float>(v: F, w: F, curvature: F) -> F {
 ///   bin's offset guess.
 /// * `bins` - `[(r * n_genes + gene) * n_bins + b]`: `v`, then `ln v`.
 /// * `out` - `[(r * n_genes + gene) * n_bins + b]`: `z`, then totals one to
-///   four of [`sweep`], all at the converged offset.
+///   four of [`sweep`], then total zero, the residual `sum d` the solve
+///   stopped at. All at the converged offset.
 /// * `status` - Per gene: `0` if every bin converged, else `1 +` the first bin
 ///   that did not. Bins after it are left unwritten.
 /// * `n_genes` - Genes in the launch.
@@ -477,9 +527,8 @@ fn gaussian_variance<F: Float>(v: F, w: F, curvature: F) -> F {
 ///
 /// ### Grid mapping
 ///
-/// * `(CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * (CUBE_DIM_X / PLANE_DIM) +
-///   PLANE_POS` -> gene
-/// * `UNIT_POS_PLANE` -> lane, striding over the cells
+/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> gene
+/// * `UNIT_POS_X` -> lane, striding over the cells by `CUBE_DIM_X`
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 pub fn sweep_grid_gpu<F: Float + CubeElement>(
@@ -494,20 +543,19 @@ pub fn sweep_grid_gpu<F: Float + CubeElement>(
     n_bins: u32,
     cold_start: u32,
 ) {
-    // The plane's own id, never `UNIT_POS_X / PLANE_DIM`: nothing obliges a
-    // driver to lay subgroups out contiguously.
-    let gene = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * (CUBE_DIM_X / PLANE_DIM) + PLANE_POS;
+    let gene = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
     if gene >= n_genes {
         terminate!();
     }
-    let lane = UNIT_POS_PLANE;
+    let lead = UNIT_POS_X == 0u32;
+    let mut partials = SharedMemory::<F>::new((N_TOTALS * MAX_PLANES_PER_GENE) as usize);
     let row = gene * n_cells;
     let zero = F::new(0.0);
     let one = F::new(1.0);
 
     let ln_s = gene_scalars[(n_genes + gene) as usize];
     let mut z = gene_scalars[(2u32 * n_genes + gene) as usize];
-    let mut tot = Array::<F>::new(5usize);
+    let mut tot = Array::<F>::new(N_TOTALS as usize);
     let mut failed: u32 = 0u32;
 
     let mut b = 0u32;
@@ -522,7 +570,7 @@ pub fn sweep_grid_gpu<F: Float + CubeElement>(
             log_totals,
             row,
             n_cells,
-            lane,
+            &mut partials,
             v,
             log_vs - z,
             &mut tot,
@@ -552,7 +600,7 @@ pub fn sweep_grid_gpu<F: Float + CubeElement>(
                 log_totals,
                 row,
                 n_cells,
-                lane,
+                &mut partials,
                 v,
                 log_vs - z,
                 &mut tot,
@@ -606,7 +654,7 @@ pub fn sweep_grid_gpu<F: Float + CubeElement>(
                     log_totals,
                     row,
                     n_cells,
-                    lane,
+                    &mut partials,
                     v,
                     log_vs - z,
                     &mut tot,
@@ -619,7 +667,7 @@ pub fn sweep_grid_gpu<F: Float + CubeElement>(
             break;
         }
 
-        if lane == 0u32 {
+        if lead {
             let base = gene * n_bins + b;
             let stride = n_genes * n_bins;
             out[base as usize] = z;
@@ -627,11 +675,12 @@ pub fn sweep_grid_gpu<F: Float + CubeElement>(
             out[(2u32 * stride + base) as usize] = tot[2];
             out[(3u32 * stride + base) as usize] = tot[3];
             out[(4u32 * stride + base) as usize] = tot[4];
+            out[(5u32 * stride + base) as usize] = tot[0];
         }
         b += 1u32;
     }
 
-    if lane == 0u32 {
+    if lead {
         let mut code = 0u32;
         if failed != 0u32 {
             code = b + 1u32;

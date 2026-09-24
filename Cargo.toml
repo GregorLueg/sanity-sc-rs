@@ -52,3 +52,7 @@ debug = true
 [[example]]
 name = "profile_gpu"
 required-features = ["gpu"]
+
+[[test]]
+name = "gpu"
+required-features = ["gpu-tests"]

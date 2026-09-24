@@ -476,6 +476,40 @@ fn write_point_estimate(
     }
 }
 
+/// The log marginal likelihood of one gene at one variance, in `f64`.
+///
+/// One offset solve and one Laplace fit, SI eq. 27 and 33. The GPU path calls
+/// this for the few bins its own `f32` likelihood cannot separate.
+///
+/// ### Params
+///
+/// * `v` - The variance.
+/// * `s` - `K`, the total UMI count of this gene.
+/// * `counts` - Dense UMI counts for this gene.
+/// * `log_totals` - `ln T_c` for every cell.
+/// * `guess` - Starting offset.
+/// * `omega` - Scratch, length `n_cells`.
+/// * `log_omega` - Scratch, length `n_cells`.
+///
+/// ### Returns
+///
+/// `ln P(k | v)` and the offset `z(v)`, or a solver failure.
+#[cfg(feature = "gpu")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn log_marginal_at(
+    v: f64,
+    s: f64,
+    counts: &[f64],
+    log_totals: &[f64],
+    guess: f64,
+    omega: &mut [f64],
+    log_omega: &mut [f64],
+) -> Result<(f64, f64), SanityErrors> {
+    let point = solve_stationary(v, s, counts, log_totals, guess, &mut None, omega, log_omega)?;
+    let fit = laplace(&point, counts, log_totals, omega, log_omega);
+    Ok((fit.log_marginal, point.z))
+}
+
 /////////////////
 // GeneSummary //
 /////////////////
