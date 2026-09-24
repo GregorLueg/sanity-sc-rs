@@ -6,11 +6,12 @@
 //!
 //! ### Mapping
 //!
-//! The first pass is [`kernels::sweep_grid_gpu`]: one plane per gene, running
-//! the whole variance grid, with each cell sweep reduced across the plane so
-//! every lane agrees on the offset solve without a barrier. The host then
-//! assembles each bin's log marginal likelihood in `f64` and forms the weights.
-//! The second pass is [`kernels::marginalise_gpu`]: one thread per gene and
+//! The first pass is [`fn@kernels::sweep_grid_gpu`]: one workgroup of whole planes
+//! per gene, running the whole variance grid, with each cell sweep reduced
+//! across the workgroup so every thread agrees on the offset solve. The host
+//! then assembles each bin's log marginal likelihood in `f64` and forms the
+//! weights.
+//! The second pass is [`fn@kernels::marginalise_gpu`]: one thread per gene and
 //! cell, integrating over the kept bins with the offsets the first pass left
 //! on the device.
 //!
@@ -18,7 +19,7 @@
 //!
 //! Compensated summation is no defence on this backend: wgpu compiles Metal
 //! shaders with fast-math on, which folds a `two_sum`. So the arithmetic is
-//! arranged so that nothing cancels, by three exact rewrites:
+//! arranged so that nothing cancels, by five exact rewrites:
 //!
 //! * **The offset term leaves the likelihood.** With `d_c = t_c - ln T_c -
 //!   ln(v s) + z` and `s = sum_c k_c`, `sum_c k_c d_c - s z = sum_c k_c t_c -
@@ -32,11 +33,20 @@
 //!   `ln(1 + (1 - d_c) / (v k_c))`. See `kernels::sweep`.
 //! * **The host assembles the likelihood.** The device returns only the five
 //!   sums; the combination, which does cancel, happens in `f64`.
+//! * **The likelihood is taken where the solve stopped.** The `-s z` form holds
+//!   only at an exact root; the host adds the term the residual leaves, which
+//!   turns a first-order error into a second-order one. See `log_marginal`.
+//! * **The offset is solved relative to an `f64` anchor.** `z` is of order 20,
+//!   where `f32` resolves only `2e-6`, and the Laplace determinant is not
+//!   stationary in it. See `kernels::OFFSET_ULPS_F32`.
 //!
 //! Without the second rewrite, the sums were of order `v s` and `K ln K`. On a
 //! simulated gene holding a quarter of the reads (`K = 2.6e6`) that left its log
 //! fold changes `1.6e-2` of an error bar from the CPU's, above the 1% to which
 //! the grid itself is resolved ([`crate::config::DEFAULT_VARIANCE_BINS`]).
+//! With all five, measured 2026-09-24 against the CPU path, the worst log fold
+//! change is `1.9e-4` of an error bar at 2000 genes by 20000 cells and `2.7e-3`
+//! at 500 by 200000; `docs/BENCHMARKS.md` has the full table.
 
 pub mod kernels;
 
@@ -131,7 +141,7 @@ struct SweepResult<R: Runtime> {
     /// The raw output, left on the device for the second pass.
     device: GpuTensor<R, f32>,
     /// Per-gene, per-bin parameters the pass ran with; see
-    /// [`kernels::sweep_grid_gpu`].
+    /// [`fn@kernels::sweep_grid_gpu`].
     bins: GpuTensor<R, f32>,
     /// Per-gene scalars the pass ran with.
     scalars: GpuTensor<R, f32>,
@@ -144,7 +154,7 @@ struct SweepResult<R: Runtime> {
 
 /// The host's anchor for the offset at one variance, `ln(sum_c T_c) + v / 2`.
 ///
-/// The device solves for `z` relative to it; see [`kernels::sweep_grid_gpu`].
+/// The device solves for `z` relative to it; see [`fn@kernels::sweep_grid_gpu`].
 /// It is the cold guess, so the anchored offset is of order one.
 ///
 /// ### Params
@@ -269,6 +279,7 @@ fn planes_per_gene(n_cells: usize, limits: &GpuLimits) -> Result<u32, SanityErro
 ///
 /// The pass's output, or [`SanityErrors::GpuOffsetSolveDiverged`] for the first
 /// gene whose solve failed.
+#[allow(clippy::too_many_arguments)]
 fn run_sweep<R: Runtime>(
     batch: &Batch<R>,
     log_totals: &GpuTensor<R, f32>,
@@ -583,7 +594,7 @@ fn resolve_max_posterior(
 /// Same inference as [`crate::sanity`], evaluated in `f32` on the device with
 /// the likelihood assembled in `f64` on the host. See the module doc for the
 /// precision this costs. Genes are processed in batches bounded by
-/// [`GPU_BATCH_BYTES`] and the device's per-binding limit.
+/// `GPU_BATCH_BYTES` and the device's per-binding limit.
 ///
 /// ### Params
 ///

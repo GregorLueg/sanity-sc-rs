@@ -67,6 +67,31 @@ uninformative genes before they're ever stored.
 | `MaxPosterior` | Collapses to the most probable bin. Fast, but the answer moves with the grid. |
 | `Fixed(v)` | One variance for every gene. No grid at all. |
 
+### GPU
+
+Behind the `gpu` feature: CubeCL on wgpu, so Metal, Vulkan or DX12. Same
+inference, same output struct.
+
+```rust
+use cubecl::prelude::*;
+use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+use sanity_sc_rs::gpu::sanity_gpu;
+
+let client = WgpuRuntime::client(&WgpuDevice::default());
+let out = sanity_gpu::<f32, WgpuRuntime>(&counts, &cell_totals, None, &client)?;
+```
+
+On an M1 Max against all ten CPU cores, `Marginalise` runs 78x faster at 2000
+genes by 20000 cells and 60x at 500 by 200000; see `docs/BENCHMARKS.md`.
+
+wgpu has no `f64`, so the device works in `f32`. The per-cell maths is
+rearranged so no sum ever cancels, the offset is solved relative to an `f64`
+anchor held by the host, and the likelihood over the variance grid is
+assembled in `f64` on the host. Against the CPU path the worst log fold change
+moves by under 1% of its own error bar, which is as far as the variance grid
+itself is resolved. `MaxPosterior` settles near ties between bins on the CPU,
+so it matches bin for bin but gains less.
+
 ## Design
 
 Genes are independent under this model, so the method is one Rayon `par_iter`

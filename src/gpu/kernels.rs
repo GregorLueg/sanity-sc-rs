@@ -16,7 +16,7 @@ use cubecl::prelude::*;
 // Consts //
 ////////////
 
-/// Totals one sweep reduces; see [`sweep`].
+/// Totals one sweep reduces; see `sweep`.
 pub const N_TOTALS: u32 = 5;
 
 /// Most planes one gene's workgroup may hold, which also sizes the shared
@@ -522,7 +522,7 @@ fn gaussian_variance<F: Float>(v: F, w: F, curvature: F) -> F {
 /// * `bins` - `[(r * n_genes + gene) * n_bins + b]`: `v`, then `ln(v s) - a_b`,
 ///   then the anchor step `a_b - a_{b-1}` (zero at the first bin).
 /// * `out` - `[(r * n_genes + gene) * n_bins + b]`: `zeta`, then totals one to
-///   four of [`sweep`], then total zero, the residual `sum d` the solve
+///   four of `sweep`, then total zero, the residual `sum d` the solve
 ///   stopped at. All at the converged offset.
 /// * `status` - Per gene: `0` if every bin converged, else `1 +` the first bin
 ///   that did not. Bins after it are left unwritten.
@@ -572,7 +572,7 @@ pub fn sweep_grid_gpu<F: Float + CubeElement>(
         z -= bins[((2u32 * n_genes + gene) * n_bins + b) as usize];
         let resolution = F::new(OFFSET_ULPS_F32 * f32::EPSILON);
 
-        // `F(z) = sum_c omega_c - v s = -sum_c d_c`; see [`sweep`].
+        // `F(z) = sum_c omega_c - v s = -sum_c d_c`; see `sweep`.
         sweep::<F>(
             counts,
             log_totals,
