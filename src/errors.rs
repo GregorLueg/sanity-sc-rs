@@ -129,4 +129,30 @@ pub enum SanityErrors {
         /// The value that was produced.
         value: f64,
     },
+
+    /////////
+    // GPU //
+    /////////
+    #[cfg(feature = "gpu")]
+    #[error("GPU: {0}")]
+    /// A device limit or a device call failed.
+    Gpu(#[from] cubecl_utils_rs::CubeclUtilsErrors),
+
+    #[cfg(feature = "gpu")]
+    #[error("The GPU path cannot run on this device: {reason}")]
+    /// The device lacks something the kernels need, such as plane operations.
+    GpuUnsupported {
+        /// What is missing.
+        reason: String,
+    },
+
+    #[cfg(feature = "gpu")]
+    #[error("The device's offset solve for gene {gene} did not converge at variance bin {bin}.")]
+    /// The in-kernel root find for the normalisation constant failed to settle.
+    GpuOffsetSolveDiverged {
+        /// The offending gene, by input index.
+        gene: usize,
+        /// The first bin that failed.
+        bin: usize,
+    },
 }

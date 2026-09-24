@@ -14,5 +14,19 @@ jobs:
   test:
     uses: GregorLueg/personal-actions/.github/workflows/rust-test.yml@v1
     with:
-      cpu-args: '--release'
+      # Builds the gpu feature everywhere it runs, so a CubeCL break shows up
+      # in the CPU lane too. Without gpu-tests nothing here needs an adapter.
+      cpu-args: '--release --features gpu'
+      # As in ann-search-rs, Windows stays CPU only.
+      windows-cpu-args: '--release'
+      # Linux runs the kernels on lavapipe, macOS on the runner's Metal device.
+      # The parity tests compare every rule against the CPU path.
+      gpu-args: '--release --features gpu-tests'
+      # The first pass keeps its cross-plane partials in shared memory sized for
+      # a fixed number of planes. Under lavapipe an overrun is a real heap
+      # overflow, and this turns it into an abort rather than a quiet pass.
+      gpu-malloc-check: true
+      # Lavapipe is a software rasteriser and the parity tests also run the CPU
+      # path they compare against; 30 minutes is not measured to be enough.
+      timeout-minutes: 45
     secrets: inherit

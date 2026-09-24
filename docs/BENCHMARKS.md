@@ -40,3 +40,44 @@ for `log_transcription_quotients` is 320 MB of our peak.
 In both runs the outputs agree: per-gene correlation of the log transcription
 quotients and of their error bars is 1.0000 on every gene, and the largest
 absolute difference in log transcription quotient is below `5e-4`.
+
+## 2026-09-24, GPU against CPU, sanity-sc-rs c0c5192
+
+Both paths of this crate, same process, `examples/profile_gpu.rs`. Machine as
+above; the GPU is the M1 Max's own, through wgpu on Metal. CPU is `sanity` on
+10 Rayon threads in `f64`; GPU is `sanity_gpu`, `f32` on the device with the
+likelihood assembled in `f64` on the host. Simulated counts, library size 500,
+161 bins over `[1e-3, 50]`. Wall clock of the call only, kernels compiled
+beforehand.
+
+Errors are the GPU against the CPU, worst gene: the log fold change in units
+of the CPU's own error bar, and the absolute error in the log transcription
+quotient `m + d_c`.
+
+1998 genes by 20000 cells:
+
+| rule | CPU | GPU | speedup | worst `d_c` / `e_c` | worst `m + d_c` |
+|---|---|---|---|---|---|
+| `Marginalise` | 108.1 s | 1.39 s | 77.9x | `1.9e-4` | `5.9e-5` |
+| `PosteriorMean` | 72.0 s | 1.19 s | 60.8x | `1.9e-4` | `1.1e-4` |
+| `MaxPosterior` | 72.7 s | 4.78 s | 15.2x | `4.4e-5` | `8.1e-6` |
+| `Fixed(1.0)` | 1.28 s | 0.15 s | 8.4x | `5.5e-5` | `1.5e-6` |
+
+500 genes by 200000 cells:
+
+| rule | CPU | GPU | speedup | worst `d_c` / `e_c` | worst `m + d_c` |
+|---|---|---|---|---|---|
+| `Marginalise` | 207.2 s | 3.47 s | 59.6x | `2.7e-3` | `3.1e-4` |
+| `PosteriorMean` | 188.6 s | 3.79 s | 49.8x | `4.8e-3` | `3.1e-4` |
+| `MaxPosterior` | 188.8 s | 7.99 s | 23.6x | `1.0e-4` | `6.0e-6` |
+| `Fixed(1.0)` | 3.16 s | 0.36 s | 8.7x | `1.5e-4` | `1.6e-6` |
+
+Every error sits below 1% of an error bar, which is as far as the variance
+grid itself is resolved, and every log transcription quotient within the
+`5e-4` by which this crate and the reference binary agree above. The worst
+genes are the most expressed ones (`K` near `3e5`) at 200000 cells.
+
+`MaxPosterior` is the slow one on the GPU because its argmax is discrete: bins
+the device cannot separate from the best are re-solved on the CPU in `f64`, and
+genes with little data have long flat stretches of near-equal bins.
+
