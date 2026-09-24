@@ -76,15 +76,31 @@ const CELLS_PER_LANE: usize = 160;
 /// needs no particular width.
 const MARGINALISE_WORKGROUP: u32 = 256;
 
-/// Log-likelihood gap below which [`VarianceRule::MaxPosterior`] treats a bin
-/// as tied with the device's best and settles it in `f64`.
+/// Log-likelihood gap, per cell, below which [`VarianceRule::MaxPosterior`]
+/// treats a bin as tied with the device's best and settles it in `f64`.
 ///
 /// The device's error in a gap between two bins' log likelihoods, over the
-/// bins within ten units of the peak, measured 2026-09-24 on an M1 Max: at
-/// most `0.015` over 100 simulated genes by 20000 cells and `0.032` over 50 by
-/// 200000. This margin is six times the larger; the in-module tests hold the
-/// error below half of it. Each extra candidate costs one `f64` offset solve.
-const MAX_POSTERIOR_TIE_MARGIN: f64 = 0.2;
+/// bins within ten units of the peak, measured 2026-09-24 on an M1 Max with
+/// the anchored offset: at most `2.2e-3` over 100 simulated genes by 20000
+/// cells and `2.8e-2` over 50 by 200000, roughly in proportion to the cells,
+/// as rounding summed over them would be. Two shapes are all that model rests
+/// on. The margin is `4.5x` and `3.6x` those; the in-module tests hold the
+/// error below half of it. Every candidate costs an `f64` offset solve, and at
+/// a flat `0.2` the rule ran 8.5 s against 1.2 s for the grid alone at 20000.
+const MAX_POSTERIOR_TIE_MARGIN_PER_CELL: f64 = 5e-7;
+
+/// The tie margin for a run over `n_cells` cells.
+///
+/// ### Params
+///
+/// * `n_cells` - Cells.
+///
+/// ### Returns
+///
+/// [`MAX_POSTERIOR_TIE_MARGIN_PER_CELL`] times the cells.
+fn tie_margin(n_cells: usize) -> f64 {
+    MAX_POSTERIOR_TIE_MARGIN_PER_CELL * n_cells as f64
+}
 
 /// Ceiling on the largest buffer of one batch, the second pass's output.
 ///
@@ -114,12 +130,33 @@ struct Batch<R: Runtime> {
 struct SweepResult<R: Runtime> {
     /// The raw output, left on the device for the second pass.
     device: GpuTensor<R, f32>,
-    /// Per-gene, per-bin parameters the pass ran with, `v` then `ln v`.
+    /// Per-gene, per-bin parameters the pass ran with; see
+    /// [`kernels::sweep_grid_gpu`].
     bins: GpuTensor<R, f32>,
     /// Per-gene scalars the pass ran with.
     scalars: GpuTensor<R, f32>,
-    /// The output read back, `[(r * n_genes + gene) * n_bins + b]`.
+    /// The output read back, `[(r * n_genes + gene) * n_bins + b]`. Row zero is
+    /// the anchored offset; [`SweepResult::offsets`] has it in `f64`.
     host: Vec<f32>,
+    /// `z(v_b)` per gene and bin, the anchor added back in `f64`.
+    offsets: Vec<f64>,
+}
+
+/// The host's anchor for the offset at one variance, `ln(sum_c T_c) + v / 2`.
+///
+/// The device solves for `z` relative to it; see [`kernels::sweep_grid_gpu`].
+/// It is the cold guess, so the anchored offset is of order one.
+///
+/// ### Params
+///
+/// * `log_total_sum` - `ln(sum_c T_c)`.
+/// * `v` - The variance.
+///
+/// ### Returns
+///
+/// The anchor, in `f64`.
+fn offset_anchor(log_total_sum: f64, v: f64) -> f64 {
+    log_total_sum + 0.5 * v
 }
 
 /// Upload one batch of genes as dense rows.
@@ -222,6 +259,7 @@ fn planes_per_gene(n_cells: usize, limits: &GpuLimits) -> Result<u32, SanityErro
 /// * `batch` - The resident batch.
 /// * `log_totals` - `ln T_c` on the device.
 /// * `n_cells` - Cells.
+/// * `log_total_sum` - `ln(sum_c T_c)`, which fixes the offset anchors.
 /// * `bin_v` - `v` per gene and bin, `[gene * n_bins + b]`.
 /// * `guess` - First bin's offset guess per gene.
 /// * `cold_start` - Whether the guess is cold.
@@ -235,6 +273,7 @@ fn run_sweep<R: Runtime>(
     batch: &Batch<R>,
     log_totals: &GpuTensor<R, f32>,
     n_cells: usize,
+    log_total_sum: f64,
     bin_v: &[f64],
     guess: &[f64],
     cold_start: bool,
@@ -246,18 +285,34 @@ fn run_sweep<R: Runtime>(
 
     let cube_width = planes_per_gene(n_cells, &limits)? * limits.plane_size_max;
 
+    let anchor: Vec<f64> = bin_v
+        .iter()
+        .map(|&v| offset_anchor(log_total_sum, v))
+        .collect();
     let scalars: Vec<f32> = batch
         .totals
         .iter()
         .map(|&k| k as f32)
-        .chain(batch.totals.iter().map(|&k| k.ln() as f32))
-        .chain(guess.iter().map(|&z| z as f32))
+        .chain((0..n_genes).map(|g| (guess[g] - anchor[g * n_bins]) as f32))
         .collect();
     let mut bins: Vec<f32> = bin_v.iter().map(|&v| v as f32).collect();
-    bins.extend(bin_v.iter().map(|&v| v.ln() as f32));
+    bins.extend(
+        bin_v
+            .iter()
+            .zip(&anchor)
+            .enumerate()
+            .map(|(i, (&v, &a))| ((v * batch.totals[i / n_bins]).ln() - a) as f32),
+    );
+    bins.extend((0..n_genes * n_bins).map(|i| {
+        if i % n_bins == 0 {
+            0.0
+        } else {
+            (anchor[i] - anchor[i - 1]) as f32
+        }
+    }));
 
-    let scalars = GpuTensor::<R, f32>::from_slice(&scalars, vec![3 * n_genes], client)?;
-    let bins = GpuTensor::<R, f32>::from_slice(&bins, vec![2 * n_genes * n_bins], client)?;
+    let scalars = GpuTensor::<R, f32>::from_slice(&scalars, vec![2 * n_genes], client)?;
+    let bins = GpuTensor::<R, f32>::from_slice(&bins, vec![3 * n_genes * n_bins], client)?;
     let out = GpuTensor::<R, f32>::empty(vec![6 * n_genes * n_bins], client)?;
     let status = GpuTensor::<R, u32>::empty(vec![n_genes], client)?;
 
@@ -289,11 +344,17 @@ fn run_sweep<R: Runtime>(
         });
     }
     let host = out.clone().read(client)?;
+    let offsets = anchor
+        .iter()
+        .zip(&host)
+        .map(|(&a, &zeta)| a + zeta as f64)
+        .collect();
     Ok(SweepResult {
         device: out,
         bins,
         scalars,
         host,
+        offsets,
     })
 }
 
@@ -426,7 +487,7 @@ fn bin_likelihoods<R: Runtime>(
             let mut offsets = vec![0.0; n_bins];
             for (b, &v) in grid.iter().enumerate() {
                 let i = g * n_bins + b;
-                offsets[b] = h[i] as f64;
+                offsets[b] = sweep.offsets[i];
                 log_lik[b] = log_marginal(
                     v,
                     batch.totals[g],
@@ -449,7 +510,7 @@ fn bin_likelihoods<R: Runtime>(
 /// The argmax is discrete, so an `f32` error in the log likelihood far smaller
 /// than anything [`VarianceRule::Marginalise`] notices can still move it to
 /// another bin when the posterior on `v` is flat. Every bin within
-/// [`MAX_POSTERIOR_TIE_MARGIN`] of the device's best is re-solved exactly;
+/// [`tie_margin`] of the device's best is re-solved exactly;
 /// each costs one offset solve and one Laplace fit, a small fraction of the
 /// gene's full grid.
 ///
@@ -478,7 +539,7 @@ fn resolve_max_posterior(
 ) -> Result<(usize, f64), SanityErrors> {
     let peak = log_lik.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let candidates: Vec<usize> = (0..grid.len())
-        .filter(|&b| log_lik[b] >= peak - MAX_POSTERIOR_TIE_MARGIN)
+        .filter(|&b| log_lik[b] >= peak - tie_margin(log_totals.len()))
         .collect();
     if let [only] = candidates[..] {
         return Ok((only, offsets[only]));
@@ -492,7 +553,9 @@ fn resolve_max_posterior(
     }
     let mut omega = vec![0.0; n_cells];
     let mut log_omega = vec![0.0; n_cells];
+    let mut state = None;
     let mut best = (candidates[0], f64::NEG_INFINITY, offsets[candidates[0]]);
+    // `candidates` ascends in `v`, so each solve warm starts from the last.
     for b in candidates {
         let (l, z) = log_marginal_at(
             grid[b],
@@ -500,6 +563,7 @@ fn resolve_max_posterior(
             &dense,
             log_totals,
             offsets[b],
+            &mut state,
             &mut omega,
             &mut log_omega,
         )?;
@@ -597,19 +661,14 @@ fn sanity_gpu_batched<T: SanityFloat, R: Runtime>(
                     &batch,
                     &log_totals_dev,
                     n_cells,
+                    log_total_sum,
                     &vec![v; n],
                     &guess,
                     true,
                     client,
                 )?;
                 let summaries: Vec<(f64, f64, f64)> = (0..n)
-                    .map(|g| {
-                        (
-                            digamma(ks[g]) - sweep.host[g] as f64,
-                            trigamma(ks[g]).sqrt(),
-                            v,
-                        )
-                    })
+                    .map(|g| (digamma(ks[g]) - sweep.offsets[g], trigamma(ks[g]).sqrt(), v))
                     .collect();
                 (sweep, vec![1.0f32; n], summaries)
             }
@@ -620,6 +679,7 @@ fn sanity_gpu_batched<T: SanityFloat, R: Runtime>(
                     &batch,
                     &log_totals_dev,
                     n_cells,
+                    log_total_sum,
                     &bin_v,
                     &guess,
                     true,
@@ -689,6 +749,7 @@ fn sanity_gpu_batched<T: SanityFloat, R: Runtime>(
                         &batch,
                         &log_totals_dev,
                         n_cells,
+                        log_total_sum,
                         &bin_v,
                         &guess,
                         false,
@@ -697,7 +758,7 @@ fn sanity_gpu_batched<T: SanityFloat, R: Runtime>(
                     let summaries = (0..n)
                         .map(|g| {
                             (
-                                digamma(ks[g]) - point.host[g] as f64,
+                                digamma(ks[g]) - point.offsets[g],
                                 trigamma(ks[g]).sqrt(),
                                 targets[g].2,
                             )
@@ -793,6 +854,7 @@ mod tests {
             &batch,
             &log_totals_dev,
             n_cells,
+            log_total_sum,
             &bin_v,
             &guess,
             true,
@@ -812,6 +874,7 @@ mod tests {
                 }
                 let mut omega = vec![0.0; n_cells];
                 let mut log_omega = vec![0.0; n_cells];
+                let mut state = None;
                 let cpu: Vec<f64> = grid
                     .values
                     .iter()
@@ -823,6 +886,7 @@ mod tests {
                             &dense,
                             &log_totals,
                             z,
+                            &mut state,
                             &mut omega,
                             &mut log_omega,
                         )
@@ -848,9 +912,10 @@ mod tests {
     #[test]
     fn test_gpu_bin_likelihood_error_is_inside_the_tie_margin() {
         let worst = worst_gap_error(100, 20_000);
+        let margin = tie_margin(20_000);
         assert!(
-            worst <= 0.5 * MAX_POSTERIOR_TIE_MARGIN,
-            "device error {worst:e} is not safely inside the tie margin {MAX_POSTERIOR_TIE_MARGIN:e}"
+            worst <= 0.5 * margin,
+            "device error {worst:e} is not safely inside the tie margin {margin:e}"
         );
     }
 
@@ -858,9 +923,10 @@ mod tests {
     #[ignore = "a 200k cell CPU reference; run with --ignored"]
     fn test_gpu_bin_likelihood_error_is_inside_the_tie_margin_at_scale() {
         let worst = worst_gap_error(50, 200_000);
+        let margin = tie_margin(200_000);
         assert!(
-            worst <= 0.5 * MAX_POSTERIOR_TIE_MARGIN,
-            "device error {worst:e} is not safely inside the tie margin {MAX_POSTERIOR_TIE_MARGIN:e}"
+            worst <= 0.5 * margin,
+            "device error {worst:e} is not safely inside the tie margin {margin:e}"
         );
     }
 }

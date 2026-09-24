@@ -1,6 +1,7 @@
 //! CPU against GPU, every variance rule: wall clock and agreement.
 //!
-//! Positional arguments: n_genes n_cells n_bins seed library_size.
+//! Positional arguments: n_genes n_cells n_bins seed library_size [rule], where
+//! `rule` is one of `marginalise`, `mean`, `max`, `fixed`; all four if absent.
 //!
 //! cargo run --release --features gpu --example profile_gpu -- 500 20000
 
@@ -55,7 +56,16 @@ fn main() {
         VarianceRule::PosteriorMean,
         VarianceRule::MaxPosterior,
         VarianceRule::Fixed(1.0),
-    ] {
+    ]
+    .into_iter()
+    .filter(|rule| match args.get(5).map(String::as_str) {
+        None => true,
+        Some("marginalise") => matches!(rule, VarianceRule::Marginalise),
+        Some("mean") => matches!(rule, VarianceRule::PosteriorMean),
+        Some("max") => matches!(rule, VarianceRule::MaxPosterior),
+        Some("fixed") => matches!(rule, VarianceRule::Fixed(_)),
+        Some(other) => panic!("unknown rule {other}"),
+    }) {
         let params = SanityParams::new(rule, 1e-3, 50.0, n_bins);
         let start = Instant::now();
         let cpu = sanity::<f64>(&sim.counts, &sim.cell_totals, Some(params)).expect("CPU run");

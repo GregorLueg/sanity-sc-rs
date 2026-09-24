@@ -488,6 +488,9 @@ fn write_point_estimate(
 /// * `counts` - Dense UMI counts for this gene.
 /// * `log_totals` - `ln T_c` for every cell.
 /// * `guess` - Starting offset.
+/// * `state` - What `omega` and `log_omega` hold, as for
+///   [`solve_stationary`]; `None` on the first call for a gene, so that a run
+///   of calls over ascending `v` warm starts each from the last.
 /// * `omega` - Scratch, length `n_cells`.
 /// * `log_omega` - Scratch, length `n_cells`.
 ///
@@ -502,10 +505,11 @@ pub(crate) fn log_marginal_at(
     counts: &[f64],
     log_totals: &[f64],
     guess: f64,
+    state: &mut SweepState,
     omega: &mut [f64],
     log_omega: &mut [f64],
 ) -> Result<(f64, f64), SanityErrors> {
-    let point = solve_stationary(v, s, counts, log_totals, guess, &mut None, omega, log_omega)?;
+    let point = solve_stationary(v, s, counts, log_totals, guess, state, omega, log_omega)?;
     let fit = laplace(&point, counts, log_totals, omega, log_omega);
     Ok((fit.log_marginal, point.z))
 }

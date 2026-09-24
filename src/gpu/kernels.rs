@@ -28,13 +28,18 @@ pub const N_TOTALS: u32 = 5;
 /// Nothing measured gained past 16.
 pub const MAX_PLANES_PER_GENE: u32 = 16;
 
-/// Resolution of the offset, in ulp of `1 + |z|`.
+/// Resolution of the anchored offset `zeta`, in ulp of `1 + |zeta|`.
 ///
 /// The solve stops once the next Newton step, `F / S_A`, or the bracket is
-/// narrower than this. `z` is a logarithm of order `ln(sum_c T_c)`, so this is
-/// as fine as an `f32` offset can be held; the residual itself is a sum of
-/// log fold changes of order one and resolves well below it. Same role as the
-/// CPU's `OFFSET_BRACKET_ULPS`.
+/// narrower than this. Same role as the CPU's `OFFSET_BRACKET_ULPS`.
+///
+/// The device solves for `zeta = z - a_b` rather than `z` itself, with the
+/// anchor `a_b = ln(sum_c T_c) + v_b / 2` held by the host in `f64`. `z` is of
+/// order 20, where an `f32` ulp is `2e-6`, and the Laplace determinant is not
+/// stationary in `z`: its slope, `0.5 sum_c omega_c / (1 + omega_c)^2`, runs to
+/// `1e4` for an expressed gene over 200000 cells. Measured 2026-09-24 on two
+/// such genes, solving `z` directly left it `1e-5` off and moved a bin's log
+/// likelihood by `0.17` relative to its neighbour. `zeta` is of order one.
 const OFFSET_ULPS_F32: f32 = 4.0;
 
 /// Iteration cap on the Newton solve for the offset. Same as the CPU's cap: a
@@ -512,10 +517,11 @@ fn gaussian_variance<F: Float>(v: F, w: F, curvature: F) -> F {
 ///
 /// * `counts` - Dense counts, `[gene * n_cells + c]`.
 /// * `log_totals` - `ln T_c`, length `n_cells`.
-/// * `gene_scalars` - `[r * n_genes + gene]`: `K`, `ln K`, then the first
-///   bin's offset guess.
-/// * `bins` - `[(r * n_genes + gene) * n_bins + b]`: `v`, then `ln v`.
-/// * `out` - `[(r * n_genes + gene) * n_bins + b]`: `z`, then totals one to
+/// * `gene_scalars` - `[r * n_genes + gene]`: `K`, then the first bin's guess
+///   for `zeta`.
+/// * `bins` - `[(r * n_genes + gene) * n_bins + b]`: `v`, then `ln(v s) - a_b`,
+///   then the anchor step `a_b - a_{b-1}` (zero at the first bin).
+/// * `out` - `[(r * n_genes + gene) * n_bins + b]`: `zeta`, then totals one to
 ///   four of [`sweep`], then total zero, the residual `sum d` the solve
 ///   stopped at. All at the converged offset.
 /// * `status` - Per gene: `0` if every bin converged, else `1 +` the first bin
@@ -553,15 +559,17 @@ pub fn sweep_grid_gpu<F: Float + CubeElement>(
     let zero = F::new(0.0);
     let one = F::new(1.0);
 
-    let ln_s = gene_scalars[(n_genes + gene) as usize];
-    let mut z = gene_scalars[(2u32 * n_genes + gene) as usize];
+    // `z` below is the anchored offset `zeta = z - a_b`; see [`OFFSET_ULPS_F32`].
+    let mut z = gene_scalars[(n_genes + gene) as usize];
     let mut tot = Array::<F>::new(N_TOTALS as usize);
     let mut failed: u32 = 0u32;
 
     let mut b = 0u32;
     while b < n_bins {
         let v = bins[(gene * n_bins + b) as usize];
-        let log_vs = bins[((n_genes + gene) * n_bins + b) as usize] + ln_s;
+        let log_vs = bins[((n_genes + gene) * n_bins + b) as usize];
+        // Carry the previous bin's solution into this bin's anchor frame.
+        z -= bins[((2u32 * n_genes + gene) * n_bins + b) as usize];
         let resolution = F::new(OFFSET_ULPS_F32 * f32::EPSILON);
 
         // `F(z) = sum_c omega_c - v s = -sum_c d_c`; see [`sweep`].
@@ -743,7 +751,6 @@ pub fn marginalise_gpu<F: Float + CubeElement>(
     let k = counts[(gene * n_cells + c) as usize];
     let lt = log_totals[c as usize];
     let s = gene_scalars[gene as usize];
-    let ln_s = gene_scalars[(n_genes + gene) as usize];
     let stride = n_genes * n_bins;
 
     let mut running = zero;
@@ -757,7 +764,8 @@ pub fn marginalise_gpu<F: Float + CubeElement>(
         let weight = weights[base as usize];
         if weight > zero {
             let v = bins[base as usize];
-            let log_vs = bins[(stride + base) as usize] + ln_s;
+            // Both anchored by the same `a_b`, which cancels in the shift.
+            let log_vs = bins[(stride + base) as usize];
             let z = sweep_out[base as usize];
             let curvature = sweep_out[(stride + base) as usize];
             let shift = log_vs - z;
