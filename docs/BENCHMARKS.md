@@ -27,6 +27,16 @@ By arithmetic, not profiling: the two dense gene-by-cell `f64` outputs of
 `sanity` are 15.7 MB, and the harness adds a third, 7.8 MB, for
 `log_transcription_quotients`. The reference's peak grows with the thread count.
 
-Outputs agree: per-gene correlation of the log transcription quotients and of
+At scale, 1998 genes by 20 000 cells (2000 requested), library size 500,
+3 552 556 stored counts (8.9% dense), same settings:
+
+| threads | wall, ours | wall, reference | speedup | peak RSS, ours | peak RSS, reference |
+|---|---|---|---|---|---|
+| 8 | 121.4 s | 415.1 s | 3.4x | 1012 MB | 937 MB |
+
+Our split: parse 0.26 s, compute 114.2 s, write 6.9 s. The harness's extra copy
+for `log_transcription_quotients` is 320 MB of our peak.
+
+In both runs the outputs agree: per-gene correlation of the log transcription quotients and of
 their error bars is 1.0000 on every gene, and the largest absolute difference
 in log transcription quotient is below `5e-4`.
