@@ -5,7 +5,7 @@ The mathematics of the Sanity model, restated in this crate's notation.
 Source: Breda, Zavolan, van Nimwegen, *Nature Biotechnology* 39(8):1008-1016
 (2021), Supplementary Information sections S1.1 to S1.3. Equation numbers of the
 form `SI (n)` refer to that document. This file restates; it does not transcribe.
-See `PROVENANCE.md`.
+See `docs/PROVENANCE.md`.
 
 ## 0. Notation
 
