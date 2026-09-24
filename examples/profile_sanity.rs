@@ -19,9 +19,9 @@
 
 use std::time::Instant;
 
-use sanity_rs::config::{DEFAULT_VARIANCE_BINS, SanityParams, VarianceRule};
-use sanity_rs::sanity;
-use sanity_rs::simulate::{SimulationParams, simulate};
+use sanity_sc_rs::config::{DEFAULT_VARIANCE_BINS, SanityParams, VarianceRule};
+use sanity_sc_rs::sanity;
+use sanity_sc_rs::simulate::{SimulationParams, simulate};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

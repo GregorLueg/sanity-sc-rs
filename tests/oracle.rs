@@ -12,9 +12,9 @@
 //!     --v-bins 64 --out tests/data/oracle.txt
 //! ```
 
-use sanity_rs::config::{SanityParams, VarianceRule};
-use sanity_rs::input::CountMatrix;
-use sanity_rs::sanity;
+use sanity_sc_rs::config::{SanityParams, VarianceRule};
+use sanity_sc_rs::input::CountMatrix;
+use sanity_sc_rs::sanity;
 
 /// The parsed fixture.
 struct Oracle {

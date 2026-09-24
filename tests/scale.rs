@@ -4,9 +4,9 @@
 //! with `C`. Equal `T_c` is the worst case for it, and is what a downsampled or
 //! synthetic matrix looks like.
 
-use sanity_rs::config::{SanityParams, VarianceRule};
-use sanity_rs::input::CountMatrix;
-use sanity_rs::sanity;
+use sanity_sc_rs::config::{SanityParams, VarianceRule};
+use sanity_sc_rs::input::CountMatrix;
+use sanity_sc_rs::sanity;
 
 /// One gene, counts 1-7 in every third cell, uniform totals.
 fn uniform_gene_variance(n_cells: usize) -> f64 {

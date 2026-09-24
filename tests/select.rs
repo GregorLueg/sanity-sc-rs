@@ -1,7 +1,7 @@
 //! `sanity_select` against a post hoc filter of `sanity`.
 
-use sanity_rs::simulate::{Simulation, SimulationParams, simulate};
-use sanity_rs::{GeneView, SanityOutput, sanity, sanity_select};
+use sanity_sc_rs::simulate::{Simulation, SimulationParams, simulate};
+use sanity_sc_rs::{GeneView, SanityOutput, sanity, sanity_select};
 
 /// Bonsai's S6 score, `mean_c(d_c^2 / e_c^2)`, on one row.
 fn signal_to_noise(d: &[f64], e: &[f64]) -> f64 {

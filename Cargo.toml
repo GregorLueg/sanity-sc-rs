@@ -1,11 +1,11 @@
 [package]
-name = "sanity-rs"
+name = "sanity-sc-rs"
 version = "0.0.1"
 edition = "2024"
 authors = ["Gregor Lueg <gregorlueg@me.com>"]
 license = "MIT"
 description = "Bayesian inference of gene expression states from single cell UMI counts. A clean-room Rust implementation of the Sanity method, returning posterior log expression levels and their error bars."
-repository = "https://github.com/GregorLueg/sanity-rs"
+repository = "https://github.com/GregorLueg/sanity-sc-rs"
 keywords = ["bioinformatics", "single-cell", "normalisation", "bayesian", "rna-seq"]
 categories = [
     "algorithms",
@@ -14,7 +14,7 @@ categories = [
 ]
 
 [lib]
-name = "sanity_rs"
+name = "sanity_sc_rs"
 path = "src/lib.rs"
 
 [dependencies]

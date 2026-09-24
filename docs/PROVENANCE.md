@@ -1,6 +1,6 @@
 # Provenance
 
-`sanity-rs` is a clean-room implementation of the Sanity method. This file
+`sanity-sc-rs` is a clean-room implementation of the Sanity method. This file
 records what was read, by whom, and under which licence, so the basis for the
 MIT licence on this crate is auditable.
 

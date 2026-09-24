@@ -5,7 +5,7 @@ code in this repository.
 
 ## Crate
 
-`sanity-rs`: Bayesian inference of gene expression states from single cell UMI
+`sanity-sc-rs`: Bayesian inference of gene expression states from single cell UMI
 counts. A clean-room Rust implementation of the Sanity method (Breda, Zavolan,
 van Nimwegen, *Nature Biotechnology* 2021, doi 10.1038/s41587-021-00875-x).
 Library crate only, no binaries.

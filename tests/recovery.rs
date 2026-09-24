@@ -4,9 +4,9 @@
 //! 10), so these are the conditions under which the method should be at its
 //! best. A failure here is a broken implementation, not a modelling limitation.
 
-use sanity_rs::config::{SanityParams, VarianceRule};
-use sanity_rs::sanity;
-use sanity_rs::simulate::{SimulationParams, simulate};
+use sanity_sc_rs::config::{SanityParams, VarianceRule};
+use sanity_sc_rs::sanity;
+use sanity_sc_rs::simulate::{SimulationParams, simulate};
 
 /// Pearson correlation of two slices.
 fn correlation(a: &[f64], b: &[f64]) -> f64 {
@@ -25,7 +25,7 @@ fn correlation(a: &[f64], b: &[f64]) -> f64 {
 }
 
 /// Simulate and run, returning the run and the truth it was drawn from.
-fn fixture(seed: u64, rule: VarianceRule) -> (sanity_rs::SanityOutput<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+fn fixture(seed: u64, rule: VarianceRule) -> (sanity_sc_rs::SanityOutput<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
     let sim = simulate(Some(SimulationParams {
         n_genes: 300,
         n_cells: 400,
@@ -204,8 +204,8 @@ fn test_fixed_variance_runs_end_to_end() {
 
 #[test]
 fn test_rejects_a_non_positive_fixed_variance() {
-    use sanity_rs::errors::SanityErrors;
-    use sanity_rs::input::CountMatrix;
+    use sanity_sc_rs::errors::SanityErrors;
+    use sanity_sc_rs::input::CountMatrix;
 
     let counts = CountMatrix::new(vec![0, 2], vec![3, 5], vec![0, 2], 4).expect("well formed");
     let params = SanityParams {
@@ -241,7 +241,7 @@ fn test_log_transcription_quotients_add_the_gene_mean() {
 
 #[test]
 fn test_single_umi_gene_stays_finite() {
-    use sanity_rs::input::CountMatrix;
+    use sanity_sc_rs::input::CountMatrix;
 
     // A single UMI in a single cell carries no information about the variance,
     // so the gene should come back with wide error bars rather than a NaN or a
@@ -261,8 +261,8 @@ fn test_single_umi_gene_stays_finite() {
 
 #[test]
 fn test_rejects_a_gene_with_no_counts() {
-    use sanity_rs::errors::SanityErrors;
-    use sanity_rs::input::CountMatrix;
+    use sanity_sc_rs::errors::SanityErrors;
+    use sanity_sc_rs::input::CountMatrix;
 
     let counts = CountMatrix::new(vec![2], vec![5], vec![0, 1, 1], 4).expect("well formed");
     let err = sanity::<f64>(&counts, &[100.0, 200.0, 300.0, 50.0], None).unwrap_err();
@@ -271,8 +271,8 @@ fn test_rejects_a_gene_with_no_counts() {
 
 #[test]
 fn test_rejects_a_cell_with_no_library() {
-    use sanity_rs::errors::SanityErrors;
-    use sanity_rs::input::CountMatrix;
+    use sanity_sc_rs::errors::SanityErrors;
+    use sanity_sc_rs::input::CountMatrix;
 
     let counts = CountMatrix::new(vec![0, 2], vec![3, 5], vec![0, 2], 4).expect("well formed");
     let err = sanity::<f64>(&counts, &[100.0, 0.0, 300.0, 50.0], None).unwrap_err();

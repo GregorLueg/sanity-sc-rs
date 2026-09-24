@@ -219,7 +219,7 @@ def main():
     grid = np.exp(np.linspace(np.log(args.v_min), np.log(args.v_max), args.v_bins))
 
     lines = [
-        "# sanity-rs oracle fixture v1",
+        "# sanity-sc-rs oracle fixture v1",
         f"n_genes {args.genes}",
         f"n_cells {args.cells}",
         f"grid {args.v_min!r} {args.v_max!r} {args.v_bins}",

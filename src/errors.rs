@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-/// Everything a caller of `sanity-rs` can be handed back instead of a result.
+/// Everything a caller of `sanity-sc-rs` can be handed back instead of a result.
 #[derive(Debug, Error)]
 pub enum SanityErrors {
     /////////////
