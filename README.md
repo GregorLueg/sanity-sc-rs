@@ -1,4 +1,4 @@
-# sanity-rs
+# sanity-sc-rs
 
 Bayesian inference of gene expression states from single cell UMI counts. A
 clean-room Rust implementation of Sanity (Breda, Zavolan, van Nimwegen, *Nature
@@ -22,9 +22,9 @@ whole point of the method is to model the Poisson sampling in the raw counts.
 ## Usage
 
 ```rust
-use sanity_rs::config::{SanityParams, VarianceRule};
-use sanity_rs::input::CountMatrix;
-use sanity_rs::{sanity, sanity_select};
+use sanity_sc_rs::config::{SanityParams, VarianceRule};
+use sanity_sc_rs::input::CountMatrix;
+use sanity_sc_rs::{sanity, sanity_select};
 
 // Gene-major sparse: cell indices and counts per gene, CSR style.
 let counts = CountMatrix::new(indices, values, indptr, n_cells)?;
