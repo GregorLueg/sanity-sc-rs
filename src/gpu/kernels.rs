@@ -345,7 +345,7 @@ fn sweep<F: Float>(
     table_coeffs: &Tensor<F>,
     table_scalars: &Tensor<F>,
     n_panels: u32,
-    partials: &mut SharedMemory<F>,
+    partials: &mut Shared<[F]>,
     v: F,
     shift: F,
     tot: &mut Array<F>,
@@ -719,7 +719,8 @@ pub fn sweep_grid_gpu<F: Float + CubeElement>(
         terminate!();
     }
     let lead = UNIT_POS_X == 0u32;
-    let mut partials = SharedMemory::<F>::new((N_TOTALS * MAX_PLANES_PER_GENE) as usize);
+    let mut partials =
+        Shared::<[F]>::new_slice(comptime!((N_TOTALS * MAX_PLANES_PER_GENE) as usize));
     let zero = F::new(0.0_f32);
     let use_table = gene_scalars[(2u32 * n_genes + gene) as usize] > zero;
     let one = F::new(1.0_f32);
@@ -728,7 +729,7 @@ pub fn sweep_grid_gpu<F: Float + CubeElement>(
     let mut z = gene_scalars[(n_genes + gene) as usize];
     let mut tot = Array::<F>::new(N_TOTALS as usize);
     let mut tab = Array::<F>::new(N_TOTALS as usize);
-    let mut failed: u32 = 0u32;
+    let mut failed = 0u32;
 
     let mut b = 0u32;
     while b < n_bins {

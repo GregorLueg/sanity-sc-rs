@@ -8,8 +8,8 @@
 
 use std::time::Instant;
 
-use cubecl::prelude::*;
 use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+use cubecl_utils_rs::prelude::Runtime;
 use sanity_sc_rs::config::{DEFAULT_VARIANCE_BINS, SanityParams, VarianceRule, Verbosity};
 use sanity_sc_rs::gpu::sanity_gpu;
 use sanity_sc_rs::sanity;
@@ -51,7 +51,7 @@ fn main() {
     let n_genes = sim.counts.n_genes();
     println!("{n_genes} genes x {n_cells} cells, {n_bins} bins, library {library_size}");
 
-    let client = WgpuRuntime::client(&WgpuDevice::default());
+    let client = <WgpuRuntime>::client(&WgpuDevice::default());
     // Compile both kernels before anything is timed.
     let warm = SanityParams::new(
         VarianceRule::Marginalise,
@@ -60,8 +60,7 @@ fn main() {
         n_bins,
         Verbosity::Quiet,
     );
-    sanity_gpu::<f64, WgpuRuntime>(&sim.counts, &sim.cell_totals, Some(warm), &client)
-        .expect("warm-up run");
+    sanity_gpu::<f64>(&sim.counts, &sim.cell_totals, Some(warm), &client).expect("warm-up run");
 
     for rule in [
         VarianceRule::Marginalise,
@@ -83,9 +82,8 @@ fn main() {
         let cpu = sanity::<f64>(&sim.counts, &sim.cell_totals, Some(params)).expect("CPU run");
         let t_cpu = start.elapsed().as_secs_f64();
         let start = Instant::now();
-        let gpu =
-            sanity_gpu::<f64, WgpuRuntime>(&sim.counts, &sim.cell_totals, Some(params), &client)
-                .expect("GPU run");
+        let gpu = sanity_gpu::<f64>(&sim.counts, &sim.cell_totals, Some(params), &client)
+            .expect("GPU run");
         let t_gpu = start.elapsed().as_secs_f64();
 
         // A GPU run that did no work returns zeros, which no real error bar is.

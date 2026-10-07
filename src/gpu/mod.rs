@@ -115,16 +115,16 @@ const GPU_BATCH_BYTES: u64 = 512 << 20;
 /////////////
 
 /// One batch's resident inputs.
-struct Batch<R: Runtime> {
+struct Batch {
     /// Dense counts, `[gene * n_cells + c]`, for the second pass.
-    counts: GpuTensor<R, f32>,
+    counts: GpuTensor<f32>,
     /// Start of each gene's listed cells for the first pass, length
     /// `n_genes + 1`. Only table genes list any.
-    list_offsets: GpuTensor<R, u32>,
+    list_offsets: GpuTensor<u32>,
     /// Cell index of each listed cell.
-    list_cells: GpuTensor<R, u32>,
+    list_cells: GpuTensor<u32>,
     /// Count of each listed cell.
-    list_counts: GpuTensor<R, f32>,
+    list_counts: GpuTensor<f32>,
     /// Most cells any one gene of the batch walks in the first pass.
     max_walked: usize,
     /// Cells per dense row.
@@ -143,20 +143,20 @@ struct Batch<R: Runtime> {
 }
 
 /// The empty-cell table on the device, or placeholders when the run has none.
-struct DeviceTable<R: Runtime> {
+struct DeviceTable {
     /// Panel boundaries.
-    breaks: GpuTensor<R, f32>,
+    breaks: GpuTensor<f32>,
     /// Midpoint anchors.
-    anchors: GpuTensor<R, f32>,
+    anchors: GpuTensor<f32>,
     /// Chebyshev coefficients.
-    coeffs: GpuTensor<R, f32>,
+    coeffs: GpuTensor<f32>,
     /// `ln(sum_c T_c)` and `ln(sum_c T_c^2)`.
-    scalars: GpuTensor<R, f32>,
+    scalars: GpuTensor<f32>,
     /// Number of panels.
     n_panels: u32,
 }
 
-impl<R: Runtime> DeviceTable<R> {
+impl DeviceTable {
     /// Upload a table, or a one-panel placeholder that no gene reads.
     ///
     /// ### Params
@@ -167,7 +167,7 @@ impl<R: Runtime> DeviceTable<R> {
     /// ### Returns
     ///
     /// The device table, or an upload error.
-    fn new(table: Option<&ShiftTable>, client: &ComputeClient<R>) -> Result<Self, SanityErrors> {
+    fn new(table: Option<&ShiftTable>, client: &Client) -> Result<Self, SanityErrors> {
         let [breaks, anchors, coeffs, scalars] = match table {
             Some(t) => t.to_f32(),
             None => [
@@ -178,7 +178,7 @@ impl<R: Runtime> DeviceTable<R> {
             ],
         };
         let n_panels = (breaks.len() - 1) as u32;
-        let up = |x: &[f32]| GpuTensor::<R, f32>::from_slice(x, vec![x.len()], client);
+        let up = |x: &[f32]| GpuTensor::<f32>::from_slice(x, vec![x.len()], client);
         Ok(Self {
             breaks: up(&breaks)?,
             anchors: up(&anchors)?,
@@ -190,14 +190,14 @@ impl<R: Runtime> DeviceTable<R> {
 }
 
 /// The first pass's output, on the device and read back.
-struct SweepResult<R: Runtime> {
+struct SweepResult {
     /// The raw output, left on the device for the second pass.
-    device: GpuTensor<R, f32>,
+    device: GpuTensor<f32>,
     /// Per-gene, per-bin parameters the pass ran with; see
     /// [`fn@kernels::sweep_grid_gpu`].
-    bins: GpuTensor<R, f32>,
+    bins: GpuTensor<f32>,
     /// Per-gene scalars the pass ran with.
-    scalars: GpuTensor<R, f32>,
+    scalars: GpuTensor<f32>,
     /// The output read back in `f64`, `[(r * n_genes + gene) * n_bins + b]`,
     /// with each table gene's empty-cell share added; see [`finish_sweep`].
     /// Row zero is the anchored offset; [`SweepResult::offsets`] has it
@@ -240,13 +240,13 @@ fn offset_anchor(log_total_sum: f64, v: f64) -> f64 {
 /// ### Returns
 ///
 /// The batch, or a device-limit error.
-fn stage_batch<R: Runtime>(
+fn stage_batch(
     counts: &CountMatrix,
     first: usize,
     n_genes: usize,
     has_table: bool,
-    client: &ComputeClient<R>,
-) -> Result<Batch<R>, SanityErrors> {
+    client: &Client,
+) -> Result<Batch, SanityErrors> {
     let n_cells = counts.n_cells();
     let mut dense = vec![0.0f32; n_genes * n_cells];
     dense
@@ -379,17 +379,17 @@ fn planes_per_gene(n_cells: usize, limits: &GpuLimits) -> Result<u32, SanityErro
 /// The pass's output, or [`SanityErrors::GpuOffsetSolveDiverged`] for the first
 /// gene whose solve failed.
 #[allow(clippy::too_many_arguments)]
-fn run_sweep<R: Runtime>(
-    batch: &Batch<R>,
-    log_totals: &GpuTensor<R, f32>,
+fn run_sweep(
+    batch: &Batch,
+    log_totals: &GpuTensor<f32>,
     table: Option<&ShiftTable>,
-    table_dev: &DeviceTable<R>,
+    table_dev: &DeviceTable,
     log_total_sum: f64,
     bin_v: &[f64],
     guess: &[f64],
     cold_start: bool,
-    client: &ComputeClient<R>,
-) -> Result<SweepResult<R>, SanityErrors> {
+    client: &Client,
+) -> Result<SweepResult, SanityErrors> {
     let n_genes = batch.n_genes;
     let n_bins = bin_v.len() / n_genes;
     let limits = GpuLimits::from_client(client);
@@ -424,15 +424,15 @@ fn run_sweep<R: Runtime>(
     }));
 
     let log_vs = bins[n_genes * n_bins..2 * n_genes * n_bins].to_vec();
-    let scalars = GpuTensor::<R, f32>::from_slice(&scalars, vec![3 * n_genes], client)?;
-    let bins = GpuTensor::<R, f32>::from_slice(&bins, vec![3 * n_genes * n_bins], client)?;
-    let out = GpuTensor::<R, f32>::empty(vec![6 * n_genes * n_bins], client)?;
-    let status = GpuTensor::<R, u32>::empty(vec![n_genes], client)?;
+    let scalars = GpuTensor::<f32>::from_slice(&scalars, vec![3 * n_genes], client)?;
+    let bins = GpuTensor::<f32>::from_slice(&bins, vec![3 * n_genes * n_bins], client)?;
+    let out = GpuTensor::<f32>::empty(vec![6 * n_genes * n_bins], client)?;
+    let status = GpuTensor::<u32>::empty(vec![n_genes], client)?;
 
     let (gx, gy) = grid_2d(n_genes as u32, &limits)?;
     let count = checked_cube_count("sweep_grid_gpu", gx, gy, 1, &limits)?;
     unsafe {
-        sweep_grid_gpu::launch_unchecked::<f32, R>(
+        sweep_grid_gpu::launch_unchecked::<f32>(
             client,
             count,
             CubeDim::new_1d(cube_width),
@@ -543,27 +543,27 @@ fn finish_sweep(
 /// ### Returns
 ///
 /// `d_c` for every gene and cell, then `e_c`, gene-major.
-fn run_marginalise<R: Runtime>(
-    batch: &Batch<R>,
-    log_totals: &GpuTensor<R, f32>,
+fn run_marginalise(
+    batch: &Batch,
+    log_totals: &GpuTensor<f32>,
     n_cells: usize,
-    sweep: &SweepResult<R>,
+    sweep: &SweepResult,
     weights: &[f32],
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<Vec<f32>, SanityErrors> {
     let n_genes = batch.n_genes;
     let n_bins = weights.len() / n_genes;
     let limits = GpuLimits::from_client(client);
 
-    let weights = GpuTensor::<R, f32>::from_slice(weights, vec![n_genes * n_bins], client)?;
-    let out = GpuTensor::<R, f32>::empty(vec![2 * n_genes * n_cells], client)?;
+    let weights = GpuTensor::<f32>::from_slice(weights, vec![n_genes * n_bins], client)?;
+    let out = GpuTensor::<f32>::empty(vec![2 * n_genes * n_cells], client)?;
 
     let width = resolve_workgroup_size(MARGINALISE_WORKGROUP, &limits);
     let blocks_per_gene = (n_cells as u32).div_ceil(width);
     let (gx, gy) = grid_2d(blocks_per_gene * n_genes as u32, &limits)?;
     let count = checked_cube_count("marginalise_gpu", gx, gy, 1, &limits)?;
     unsafe {
-        marginalise_gpu::launch_unchecked::<f32, R>(
+        marginalise_gpu::launch_unchecked::<f32>(
             client,
             count,
             CubeDim::new_1d(width),
@@ -643,9 +643,9 @@ fn log_marginal(
 /// ### Returns
 ///
 /// Per gene, `ln P(k | v_b)` up to a per-gene constant, and `z(v_b)`.
-fn bin_likelihoods<R: Runtime>(
-    batch: &Batch<R>,
-    sweep: &SweepResult<R>,
+fn bin_likelihoods(
+    batch: &Batch,
+    sweep: &SweepResult,
     grid: &[f64],
     n_cells: usize,
 ) -> Vec<(Vec<f64>, Vec<f64>)> {
@@ -785,13 +785,13 @@ fn resolve_max_posterior(
 /// ### Returns
 ///
 /// The same output as [`crate::sanity`]. Values are `f32` precision whatever `T`.
-pub fn sanity_gpu<T: SanityFloat, R: Runtime>(
+pub fn sanity_gpu<T: SanityFloat>(
     counts: &CountMatrix,
     cell_totals: &[f64],
     params: Option<SanityParams>,
-    client: &ComputeClient<R>,
+    client: &Client,
 ) -> Result<SanityOutput<T>, SanityErrors> {
-    sanity_gpu_batched(counts, cell_totals, params, client, GPU_BATCH_BYTES, |_| {
+    sanity_gpu_batched::<T, _>(counts, cell_totals, params, client, GPU_BATCH_BYTES, |_| {
         true
     })
 }
@@ -821,19 +821,19 @@ pub fn sanity_gpu<T: SanityFloat, R: Runtime>(
 /// The kept genes in input order, with their input indices in
 /// [`SanityOutput::genes`]. Keeping nothing is not an error; the output is then
 /// empty.
-pub fn sanity_gpu_select<T, R, F>(
+pub fn sanity_gpu_select<T, F>(
     counts: &CountMatrix,
     cell_totals: &[f64],
     params: Option<SanityParams>,
-    client: &ComputeClient<R>,
+    client: &Client,
     keep: F,
 ) -> Result<SanityOutput<T>, SanityErrors>
 where
     T: SanityFloat,
-    R: Runtime,
     F: Fn(GeneView<'_>) -> bool + Sync,
 {
-    let out = sanity_gpu_batched(counts, cell_totals, params, client, GPU_BATCH_BYTES, keep)?;
+    let out =
+        sanity_gpu_batched::<T, _>(counts, cell_totals, params, client, GPU_BATCH_BYTES, keep)?;
     if params.unwrap_or_default().verbosity.normal_verbosity() {
         println!("  Kept {} / {} genes", out.n_genes, counts.n_genes());
     }
@@ -854,17 +854,16 @@ where
 /// ### Returns
 ///
 /// As [`sanity_gpu_select`].
-fn sanity_gpu_batched<T, R, F>(
+fn sanity_gpu_batched<T, F>(
     counts: &CountMatrix,
     cell_totals: &[f64],
     params: Option<SanityParams>,
-    client: &ComputeClient<R>,
+    client: &Client,
     batch_bytes: u64,
     keep: F,
 ) -> Result<SanityOutput<T>, SanityErrors>
 where
     T: SanityFloat,
-    R: Runtime,
     F: Fn(GeneView<'_>) -> bool + Sync,
 {
     let params = params.unwrap_or_default();
@@ -887,9 +886,9 @@ where
     let start = Instant::now();
 
     let table = shift_table(counts, &log_totals, &params);
-    let table_dev = DeviceTable::<R>::new(table.as_ref(), client)?;
+    let table_dev = DeviceTable::new(table.as_ref(), client)?;
     let log_totals_f32: Vec<f32> = log_totals.iter().map(|&x| x as f32).collect();
-    let log_totals_dev = GpuTensor::<R, f32>::from_slice(&log_totals_f32, vec![n_cells], client)?;
+    let log_totals_dev = GpuTensor::<f32>::from_slice(&log_totals_f32, vec![n_cells], client)?;
 
     let mut out = SanityOutput {
         log_fold_changes: Vec::new(),
@@ -1123,9 +1122,9 @@ mod tests {
             ..Default::default()
         }))
         .expect("simulates");
-        let client = WgpuRuntime::client(&WgpuDevice::default());
+        let client = <WgpuRuntime>::client(&WgpuDevice::default());
         let full: SanityOutput<f32> =
-            sanity_gpu(&sim.counts, &sim.cell_totals, None, &client).expect("runs");
+            sanity_gpu::<f32>(&sim.counts, &sim.cell_totals, None, &client).expect("runs");
 
         let mut sorted = full.variance.clone();
         sorted.sort_by(|a, b| a.total_cmp(b));
@@ -1136,7 +1135,7 @@ mod tests {
         let n_cells = full.n_cells;
         // seven genes per batch, so the selection crosses batch boundaries
         let row_bytes = 2 * n_cells as u64 * size_of::<f32>() as u64;
-        let picked: SanityOutput<f32> = sanity_gpu_batched(
+        let picked: SanityOutput<f32> = sanity_gpu_batched::<f32, _>(
             &sim.counts,
             &sim.cell_totals,
             None,
@@ -1165,7 +1164,7 @@ mod tests {
         }
 
         let none: SanityOutput<f32> =
-            sanity_gpu_select(&sim.counts, &sim.cell_totals, None, &client, |_| false)
+            sanity_gpu_select::<f32, _>(&sim.counts, &sim.cell_totals, None, &client, |_| false)
                 .expect("runs");
         assert_eq!(none.n_genes, 0);
         assert!(none.log_fold_changes.is_empty());
@@ -1181,12 +1180,13 @@ mod tests {
             ..Default::default()
         }))
         .expect("simulates");
-        let client = WgpuRuntime::client(&WgpuDevice::default());
+        let client = <WgpuRuntime>::client(&WgpuDevice::default());
         let whole: SanityOutput<f32> =
-            sanity_gpu(&sim.counts, &sim.cell_totals, None, &client).expect("runs in one batch");
+            sanity_gpu::<f32>(&sim.counts, &sim.cell_totals, None, &client)
+                .expect("runs in one batch");
         // Seven genes per batch, so the last batch is ragged.
         let row_bytes = 2 * 2000 * size_of::<f32>() as u64;
-        let split: SanityOutput<f32> = sanity_gpu_batched(
+        let split: SanityOutput<f32> = sanity_gpu_batched::<f32, _>(
             &sim.counts,
             &sim.cell_totals,
             None,
@@ -1220,12 +1220,11 @@ mod tests {
         let params = SanityParams::default();
         let (grid, log_totals, log_total_sum) =
             prepare_run(&sim.counts, &sim.cell_totals, &params).expect("valid");
-        let client = WgpuRuntime::client(&WgpuDevice::default());
+        let client = <WgpuRuntime>::client(&WgpuDevice::default());
         let n = sim.counts.n_genes();
         let log_totals_f32: Vec<f32> = log_totals.iter().map(|&x| x as f32).collect();
         let log_totals_dev =
-            GpuTensor::<WgpuRuntime, f32>::from_slice(&log_totals_f32, vec![n_cells], &client)
-                .expect("uploads");
+            GpuTensor::<f32>::from_slice(&log_totals_f32, vec![n_cells], &client).expect("uploads");
         let table = shift_table(&sim.counts, &log_totals, &params);
         let table_dev = DeviceTable::new(table.as_ref(), &client).expect("uploads");
         let batch = stage_batch(&sim.counts, 0, n, table.is_some(), &client).expect("stages");
