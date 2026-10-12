@@ -47,9 +47,9 @@ sizes, against six decimals in the text files.
 
 ## GPU against CPU
 
-Both paths in one process, `examples/profile_gpu.rs`, sanity-sc-rs 60b805f,
+Both paths in one process, `examples/profile_gpu.rs`, sanity-sc-rs v0.4.0,
 2026-10-12. CPU is `sanity` on 10 threads in `f64`; GPU is `sanity_gpu` through
-wgpu on Metal, with cubecl's `metal` feature on. Library size 500, 161 bins over
+wgpu on Metal, cubecl's WGSL translated by wgpu. Library size 500, 161 bins over
 `[1e-3, 50]`. Wall clock of the call only, kernels compiled beforehand. Errors
 are the GPU against the CPU, worst gene: the log fold change in units of the
 CPU's own error bar, and the absolute error in the log transcription quotient
@@ -59,19 +59,19 @@ CPU's own error bar, and the absolute error in the log transcription quotient
 
 | rule | CPU | GPU | speedup | worst `d_c` / `e_c` | worst `m + d_c` |
 |---|---|---|---|---|---|
-| `Marginalise` | 12.9 s | 0.37 s | 34.7x | `2.5e-4` | `1.0e-4` |
-| `PosteriorMean` | 12.7 s | 0.34 s | 37.0x | `2.9e-4` | `1.7e-4` |
-| `MaxPosterior` | 13.0 s | 0.44 s | 29.8x | `4.3e-5` | `8.1e-6` |
-| `Fixed(1.0)` | 1.49 s | 0.17 s | 8.6x | `5.5e-5` | `1.6e-6` |
+| `Marginalise` | 13.1 s | 0.57 s | 23.1x | `2.5e-4` | `1.0e-4` |
+| `PosteriorMean` | 13.1 s | 0.51 s | 25.7x | `2.9e-4` | `1.7e-4` |
+| `MaxPosterior` | 13.1 s | 0.65 s | 20.1x | `4.3e-5` | `8.1e-6` |
+| `Fixed(1.0)` | 1.40 s | 0.16 s | 8.6x | `5.5e-5` | `1.6e-6` |
 
 500 genes by 200000 cells:
 
 | rule | CPU | GPU | speedup | worst `d_c` / `e_c` | worst `m + d_c` |
 |---|---|---|---|---|---|
-| `Marginalise` | 58.7 s | 1.64 s | 35.7x | `3.1e-3` | `4.6e-4` |
-| `PosteriorMean` | 57.7 s | 1.51 s | 38.2x | `3.2e-3` | `4.6e-4` |
-| `MaxPosterior` | 59.6 s | 1.71 s | 34.9x | `2.1e-4` | `5.7e-6` |
-| `Fixed(1.0)` | 3.57 s | 0.57 s | 6.2x | `2.7e-4` | `1.6e-6` |
+| `Marginalise` | 57.8 s | 2.40 s | 24.1x | `3.1e-3` | `4.6e-4` |
+| `PosteriorMean` | 58.9 s | 2.33 s | 25.3x | `3.2e-3` | `4.6e-4` |
+| `MaxPosterior` | 59.6 s | 2.44 s | 24.4x | `2.1e-4` | `5.7e-6` |
+| `Fixed(1.0)` | 3.61 s | 0.64 s | 5.7x | `2.7e-4` | `1.6e-6` |
 
 Every error sits below 1% of an error bar, which is as far as the variance grid
 itself is resolved. The worst genes are the most expressed ones at large `v`,
@@ -92,7 +92,7 @@ errors exactly. Still a third of the way to the 1% line.
 on the CPU. Those re-solves run the same sparse path as `sanity`, so they cost
 little, and the rule lands on the same bin as the CPU.
 
-## GPU: Metal source against WGSL
+## GPU: why not cubecl's `metal` feature
 
 The same code with and without cubecl's `metal` feature, `Marginalise`, GPU
 only, best of three after a warm-up, 2026-10-12. Without the feature, wgpu
@@ -104,5 +104,16 @@ source. Same answers either way.
 | 1998 genes by 20000 cells | 0.48 s | 0.30 s |
 | 500 genes by 200000 cells | 2.12 s | 1.30 s |
 
-The feature only changes anything on Apple. Elsewhere wgpu takes the WGSL as
-before.
+So why leave it off? Cargo unifies features. One crate turning `metal` on
+switches every crate sharing cubecl in that build onto Metal source, whether it
+asked or not, and it is not a win everywhere: ann-search-rs's k-means
+assignment kernel ran 4.4x slower with it. One switch for the whole ecosystem
+beats a per-crate guess.
+
+The gap itself is cubecl 0.11. It lowers every `break` and `return` into a flag
+variable that guards the rest of the block, and wgpu's translation of that to
+Metal runs slower. Feeding cubecl 0.10's WGSL for the same two kernels into the
+0.11 runtime gives back 0.10's speed (first pass 195 to 145 ms, second pass 38.6
+to 32.4 ms at 500 genes by 20000 cells). Rewriting just the flags back into
+`break` and `return` by hand recovers all of the second pass and two thirds of
+the first.
