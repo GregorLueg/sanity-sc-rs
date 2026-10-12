@@ -717,6 +717,8 @@ fn owner(offsets: &Tensor<u32>, n: u32, x: u32) -> u32 {
 ///   others do not; the host adds theirs in `f64`.
 /// * `status` - Per gene: `0` if every bin converged, else `1 +` the first bin
 ///   that did not. Bins after it are left unwritten.
+/// * `order` - The gene each cube runs, a permutation of the batch. The host
+///   puts the genes that walk the most cells first.
 /// * `n_genes` - Genes in the launch.
 /// * `n_cells` - Cells.
 /// * `n_bins` - Bins per gene.
@@ -724,7 +726,7 @@ fn owner(offsets: &Tensor<u32>, n: u32, x: u32) -> u32 {
 ///
 /// ### Grid mapping
 ///
-/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> gene
+/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> slot; `order[slot]` -> gene
 /// * `UNIT_POS_X` -> lane, striding over the cells by `CUBE_DIM_X`
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
@@ -743,15 +745,17 @@ pub fn sweep_grid_gpu<F: Float + CubeElement>(
     bins: &Tensor<F>,
     out: &mut Tensor<F>,
     status: &mut Tensor<u32>,
+    order: &Tensor<u32>,
     n_genes: u32,
     n_cells: u32,
     n_bins: u32,
     cold_start: u32,
 ) {
-    let gene = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
-    if gene >= n_genes {
+    let slot = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
+    if slot >= n_genes {
         terminate!();
     }
+    let gene = order[slot as usize];
     let lead = UNIT_POS_X == 0u32;
     let mut partials =
         Shared::<[F]>::new_slice(comptime!((N_TOTALS * MAX_PLANES_PER_GENE) as usize));

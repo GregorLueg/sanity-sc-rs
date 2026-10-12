@@ -130,8 +130,6 @@ struct Batch {
     /// Listed cells over all genes, without the placeholder an empty list
     /// is bound with.
     n_listed: u32,
-    /// Most cells any one gene of the batch walks in the first pass.
-    max_walked: usize,
     /// Cells per dense row.
     counts_cells: usize,
     /// Per gene, whether its empty cells come from the table, in which case
@@ -318,7 +316,6 @@ fn stage_batch(
     let mut list_cells: Vec<u32> = Vec::new();
     let mut list_counts: Vec<f32> = Vec::new();
     list_offsets.push(0u32);
-    let mut max_walked = 0;
     for (g, &sparse) in use_table.iter().enumerate() {
         if sparse {
             let (indices, values) = counts.gene(first + g);
@@ -328,10 +325,6 @@ fn stage_batch(
                     list_counts.push(k as f32);
                 }
             }
-            max_walked =
-                max_walked.max(list_cells.len() - *list_offsets.last().unwrap_or(&0) as usize);
-        } else {
-            max_walked = n_cells;
         }
         list_offsets.push(list_cells.len() as u32);
     }
@@ -348,7 +341,6 @@ fn stage_batch(
         list_cells: GpuTensor::from_slice(&list_cells, vec![list_cells.len()], client)?,
         list_counts: GpuTensor::from_slice(&list_counts, vec![list_counts.len()], client)?,
         n_listed,
-        max_walked,
         counts_cells: n_cells,
         use_table,
         totals,
@@ -439,7 +431,24 @@ fn run_sweep(
     let n_bins = bin_v.len() / n_genes;
     let limits = GpuLimits::from_client(client);
 
-    let cube_width = planes_per_gene(batch.max_walked, &limits)? * limits.plane_size_max;
+    // The pass takes as long as its slowest genes, the ones walking the most
+    // cells, so they are dispatched first. Measured 2026-10-12 on simulated data,
+    // kernel time against input order: 240 to 186 ms at 2000 genes by 20000
+    // cells, 1.22 to 0.86 s at 500 by 200000. Launching each width class at its
+    // own width was slower than either, as the launches run one after another.
+    let walked: Vec<usize> = (0..n_genes)
+        .map(|g| {
+            if batch.use_table[g] {
+                batch.n_expressed[g]
+            } else {
+                batch.counts_cells
+            }
+        })
+        .collect();
+    let mut order: Vec<u32> = (0..n_genes as u32).collect();
+    order.sort_by_key(|&g| std::cmp::Reverse(walked[g as usize]));
+    let widest = walked.iter().copied().max().unwrap_or(0);
+    let cube_width = planes_per_gene(widest, &limits)? * limits.plane_size_max;
 
     let anchor: Vec<f64> = bin_v
         .iter()
@@ -474,6 +483,7 @@ fn run_sweep(
     let out = GpuTensor::<f32>::empty(vec![6 * n_genes * n_bins], client)?;
     let status = GpuTensor::<u32>::empty(vec![n_genes], client)?;
 
+    let order = GpuTensor::<u32>::from_slice(&order, vec![n_genes], client)?;
     let (gx, gy) = grid_2d(n_genes as u32, &limits)?;
     let count = checked_cube_count("sweep_grid_gpu", gx, gy, 1, &limits)?;
     unsafe {
@@ -495,6 +505,7 @@ fn run_sweep(
             bins.into_tensor_arg(),
             out.into_tensor_arg(),
             status.into_tensor_arg(),
+            order.into_tensor_arg(),
             n_genes as u32,
             batch.counts_cells as u32,
             n_bins as u32,
@@ -1193,15 +1204,25 @@ where
                 },
             )
             .collect();
-        for (g, &(m, dm, v)) in summaries.iter().enumerate() {
-            if !kept[g] {
-                continue;
-            }
-            let lo = g * n_cells;
-            out.log_fold_changes
-                .extend(lfc[lo..lo + n_cells].iter().map(|&x| narrow::<T>(x as f64)));
-            out.error_bars
-                .extend(eb[lo..lo + n_cells].iter().map(|&x| narrow::<T>(x as f64)));
+        let kept: Vec<usize> = (0..n).filter(|&g| kept[g]).collect();
+        let base = out.log_fold_changes.len();
+        out.log_fold_changes
+            .resize(base + kept.len() * n_cells, T::zero());
+        out.error_bars
+            .resize(base + kept.len() * n_cells, T::zero());
+        out.log_fold_changes[base..]
+            .par_chunks_mut(n_cells)
+            .zip(out.error_bars[base..].par_chunks_mut(n_cells))
+            .zip(kept.par_iter())
+            .for_each(|((d, e), &g)| {
+                let lo = g * n_cells;
+                for c in 0..n_cells {
+                    d[c] = narrow(lfc[lo + c] as f64);
+                    e[c] = narrow(eb[lo + c] as f64);
+                }
+            });
+        for &g in &kept {
+            let (m, dm, v) = summaries[g];
             out.mean_log_quotient.push(narrow(m));
             out.mean_log_quotient_error.push(narrow(dm));
             out.variance.push(narrow(v));
