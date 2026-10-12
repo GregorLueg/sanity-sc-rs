@@ -22,12 +22,21 @@
 * The GPU first pass dispatches the genes that walk the most cells first, so
   the slowest ones no longer start last.
 * The GPU output is copied out in parallel.
+* Net against v0.3.0 on an M1 Max: `Marginalise` on the GPU goes from 0.82 s
+  to 0.57 s at 1998 genes by 20000 cells and stays flat at 200000 cells (2.36 s
+  to 2.40 s). `MaxPosterior` at 200000 cells is slower, 2.23 s to 2.44 s. The
+  v0.3.0 run has no load record, so read these as good to 10 to 20%.
 
 ### Numerics
 
 * cubecl 0.11 fuses multiply-adds into `fma` and can't be told not to. The
   worst GPU log fold change at 200000 cells moves from `1.9e-3` to `3.1e-3` of
   an error bar against the CPU, still well inside the 1% the grid resolves.
+
+### Docs
+
+* README: badges, an installation section and performance tables against the
+  reference binary and between CPU and GPU.
 
 ## v0.3.0
 
