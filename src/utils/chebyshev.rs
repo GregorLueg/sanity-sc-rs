@@ -79,6 +79,27 @@ impl Chebyshev {
         0.5 * (self.a + self.b) + 0.5 * (self.b - self.a) * t
     }
 
+    /// The interval, `(a, b)`.
+    ///
+    /// ### Returns
+    ///
+    /// Its start and end.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn interval(&self) -> (f64, f64) {
+        (self.a, self.b)
+    }
+
+    /// The tabulated transform, `[k * n_points + j]`: coefficient `k` is the
+    /// dot of row `k` with the node values.
+    ///
+    /// ### Returns
+    ///
+    /// The transform, row-major.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn transform(&self) -> &[f64] {
+        &self.transform
+    }
+
     /// Chebyshev coefficients of the values at the nodes.
     ///
     /// ### Params

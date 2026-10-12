@@ -77,7 +77,7 @@ pub(crate) const SPARSE_MAX_DENSITY: f64 = 0.5;
 /// library log sd of 0.5 and `9.1e-10` for 1.5, a spread well past droplet
 /// data. Run time did not depend on the degree, so this takes the degree that
 /// stays at the per-cell pass's own noise across both.
-const EMPTY_FIT_DEGREE: usize = 48;
+pub(crate) const EMPTY_FIT_DEGREE: usize = 48;
 
 /// Smallest width of the fit's interval in `ln T`.
 ///

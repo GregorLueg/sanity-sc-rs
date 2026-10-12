@@ -14,9 +14,11 @@
 //! the solve; the host adds the same sums back in `f64` (see [`finish_sweep`]).
 //! The host then assembles each bin's log marginal likelihood in `f64` and
 //! forms the weights.
-//! The second pass is [`fn@kernels::marginalise_gpu`]: one thread per gene and
-//! cell, integrating over the kept bins with the offsets the first pass left
-//! on the device.
+//! The second pass is [`fn@kernels::marginalise_gpu`]: one thread per evaluated
+//! cell, integrating over the kept bins with the offsets the first pass left on
+//! the device. As on the CPU, a listed gene evaluates only its nonzero cells and
+//! the nodes of one empty-cell fit in `ln T`; [`fn@kernels::fill_cells_gpu`]
+//! interpolates its empty cells from the nodes.
 //!
 //! ### Precision
 //!
@@ -66,14 +68,14 @@ use crate::input::CountMatrix;
 use crate::model::empty_cells::{EmptySums, N_SUMS, PANEL_POINTS, ShiftTable};
 use crate::model::fractions::NonzeroCells;
 use crate::model::gene::{
-    MARGINALISE_MIN_WEIGHT, SPARSE_MAX_DENSITY, collapse_target, log_marginal_at,
+    MARGINALISE_MIN_WEIGHT, SPARSE_MAX_DENSITY, collapse_target, empty_cell_fit, log_marginal_at,
     log_marginal_at_sparse, marginal_summary, posterior_weights,
 };
 use crate::utils::polygamma::{digamma, trigamma};
 use crate::utils::progress::report_decile_progress;
 use crate::{GeneView, SanityOutput, prepare_run, print_run_header, shift_table};
 
-use self::kernels::{marginalise_gpu, sweep_grid_gpu};
+use self::kernels::{fill_cells_gpu, marginalise_gpu, scatter_listed_gpu, sweep_grid_gpu};
 
 ////////////
 // Consts //
@@ -125,6 +127,9 @@ struct Batch {
     list_cells: GpuTensor<u32>,
     /// Count of each listed cell.
     list_counts: GpuTensor<f32>,
+    /// Listed cells over all genes, without the placeholder an empty list
+    /// is bound with.
+    n_listed: u32,
     /// Most cells any one gene of the batch walks in the first pass.
     max_walked: usize,
     /// Cells per dense row.
@@ -185,6 +190,44 @@ impl DeviceTable {
             coeffs: up(&coeffs)?,
             scalars: up(&scalars)?,
             n_panels,
+        })
+    }
+}
+
+/// The run's empty-cell fit on the device; see
+/// [`fn@kernels::marginalise_gpu`].
+struct DeviceFit {
+    /// Nodes in `ln T`, [`kernels::FIT_POINTS`] long.
+    nodes: GpuTensor<f32>,
+    /// The transform from node values to coefficients, row-major.
+    transform: GpuTensor<f32>,
+    /// `2 / (b - a)` and `(a + b) / (b - a)`.
+    map: GpuTensor<f32>,
+}
+
+impl DeviceFit {
+    /// Upload the fit [`empty_cell_fit`] builds over the run's `ln T`.
+    ///
+    /// ### Params
+    ///
+    /// * `log_totals` - `ln T_c` for every cell.
+    /// * `client` - CubeCL compute client.
+    ///
+    /// ### Returns
+    ///
+    /// The device fit, or an upload error.
+    fn new(log_totals: &[f64], client: &Client) -> Result<Self, SanityErrors> {
+        let fit = empty_cell_fit(log_totals);
+        debug_assert_eq!(fit.n_points(), kernels::FIT_POINTS as usize);
+        let (a, b) = fit.interval();
+        let nodes: Vec<f32> = (0..fit.n_points()).map(|j| fit.node(j) as f32).collect();
+        let transform: Vec<f32> = fit.transform().iter().map(|&x| x as f32).collect();
+        let map = [(2.0 / (b - a)) as f32, ((a + b) / (b - a)) as f32];
+        let up = |x: &[f32]| GpuTensor::<f32>::from_slice(x, vec![x.len()], client);
+        Ok(Self {
+            nodes: up(&nodes)?,
+            transform: up(&transform)?,
+            map: up(&map)?,
         })
     }
 }
@@ -292,6 +335,7 @@ fn stage_batch(
         }
         list_offsets.push(list_cells.len() as u32);
     }
+    let n_listed = list_cells.len() as u32;
     // A batch with nothing listed still needs non-empty bindings.
     if list_cells.is_empty() {
         list_cells.push(0);
@@ -303,6 +347,7 @@ fn stage_batch(
         list_offsets: GpuTensor::from_slice(&list_offsets, vec![n_genes + 1], client)?,
         list_cells: GpuTensor::from_slice(&list_cells, vec![list_cells.len()], client)?,
         list_counts: GpuTensor::from_slice(&list_counts, vec![list_counts.len()], client)?,
+        n_listed,
         max_walked,
         counts_cells: n_cells,
         use_table,
@@ -538,6 +583,7 @@ fn finish_sweep(
 /// * `n_cells` - Cells.
 /// * `sweep` - The first pass whose bins to integrate over.
 /// * `weights` - `W_b` per gene and bin, zero for a dropped bin.
+/// * `fit` - The run's empty-cell fit.
 /// * `client` - CubeCL compute client.
 ///
 /// ### Returns
@@ -549,18 +595,42 @@ fn run_marginalise(
     n_cells: usize,
     sweep: &SweepResult,
     weights: &[f32],
+    fit: &DeviceFit,
     client: &Client,
 ) -> Result<Vec<f32>, SanityErrors> {
     let n_genes = batch.n_genes;
     let n_bins = weights.len() / n_genes;
     let limits = GpuLimits::from_client(client);
+    let width = resolve_workgroup_size(MARGINALISE_WORKGROUP, &limits);
+    let n_points = kernels::FIT_POINTS as usize;
+
+    // As the CPU's `load_cells`: interpolate only when there are more empty
+    // cells than nodes. A gene not listed has no compact form at all.
+    let fitted: Vec<u32> = (0..n_genes)
+        .map(|g| u32::from(batch.use_table[g] && n_cells - batch.n_expressed[g] > n_points))
+        .collect();
+    let mut compact_offsets = vec![0u32; n_genes + 1];
+    let mut block_offsets = vec![0u32; n_genes + 1];
+    for g in 0..n_genes {
+        let size = if fitted[g] == 1 {
+            batch.n_expressed[g] + n_points
+        } else {
+            n_cells
+        } as u32;
+        compact_offsets[g + 1] = compact_offsets[g] + size;
+        block_offsets[g + 1] = block_offsets[g] + size.div_ceil(width);
+    }
+    let n_entries = compact_offsets[n_genes] as usize;
+    let n_listed = batch.n_listed;
 
     let weights = GpuTensor::<f32>::from_slice(weights, vec![n_genes * n_bins], client)?;
+    let fitted = GpuTensor::<u32>::from_slice(&fitted, vec![n_genes], client)?;
+    let compact_dev = GpuTensor::<u32>::from_slice(&compact_offsets, vec![n_genes + 1], client)?;
+    let blocks_dev = GpuTensor::<u32>::from_slice(&block_offsets, vec![n_genes + 1], client)?;
+    let entries = GpuTensor::<f32>::empty(vec![2 * n_entries], client)?;
     let out = GpuTensor::<f32>::empty(vec![2 * n_genes * n_cells], client)?;
 
-    let width = resolve_workgroup_size(MARGINALISE_WORKGROUP, &limits);
-    let blocks_per_gene = (n_cells as u32).div_ceil(width);
-    let (gx, gy) = grid_2d(blocks_per_gene * n_genes as u32, &limits)?;
+    let (gx, gy) = grid_2d(block_offsets[n_genes], &limits)?;
     let count = checked_cube_count("marginalise_gpu", gx, gy, 1, &limits)?;
     unsafe {
         marginalise_gpu::launch_unchecked::<f32>(
@@ -568,17 +638,66 @@ fn run_marginalise(
             count,
             CubeDim::new_1d(width),
             batch.counts.into_tensor_arg(),
+            batch.list_offsets.into_tensor_arg(),
+            batch.list_cells.into_tensor_arg(),
+            batch.list_counts.into_tensor_arg(),
             log_totals.into_tensor_arg(),
+            fit.nodes.into_tensor_arg(),
+            fitted.into_tensor_arg(),
+            compact_dev.into_tensor_arg(),
+            blocks_dev.into_tensor_arg(),
             sweep.scalars.into_tensor_arg(),
             sweep.bins.into_tensor_arg(),
             sweep.device.into_tensor_arg(),
             weights.into_tensor_arg(),
-            out.into_tensor_arg(),
+            entries.into_tensor_arg(),
             n_genes as u32,
             n_cells as u32,
             n_bins as u32,
+        );
+    }
+
+    let blocks_per_gene = (n_cells as u32).div_ceil(width);
+    let (gx, gy) = grid_2d(blocks_per_gene * n_genes as u32, &limits)?;
+    let count = checked_cube_count("fill_cells_gpu", gx, gy, 1, &limits)?;
+    unsafe {
+        fill_cells_gpu::launch_unchecked::<f32>(
+            client,
+            count,
+            CubeDim::new_1d(width),
+            entries.into_tensor_arg(),
+            batch.list_offsets.into_tensor_arg(),
+            fitted.into_tensor_arg(),
+            compact_dev.into_tensor_arg(),
+            log_totals.into_tensor_arg(),
+            fit.transform.into_tensor_arg(),
+            fit.map.into_tensor_arg(),
+            out.into_tensor_arg(),
+            n_genes as u32,
+            n_cells as u32,
             blocks_per_gene,
         );
+    }
+
+    if n_listed > 0 {
+        let (gx, gy) = grid_2d(n_listed.div_ceil(width), &limits)?;
+        let count = checked_cube_count("scatter_listed_gpu", gx, gy, 1, &limits)?;
+        unsafe {
+            scatter_listed_gpu::launch_unchecked::<f32>(
+                client,
+                count,
+                CubeDim::new_1d(width),
+                entries.into_tensor_arg(),
+                batch.list_offsets.into_tensor_arg(),
+                batch.list_cells.into_tensor_arg(),
+                fitted.into_tensor_arg(),
+                compact_dev.into_tensor_arg(),
+                out.into_tensor_arg(),
+                n_genes as u32,
+                n_cells as u32,
+                n_listed,
+            );
+        }
     }
     Ok(out.read(client)?)
 }
@@ -887,6 +1006,7 @@ where
 
     let table = shift_table(counts, &log_totals, &params);
     let table_dev = DeviceTable::new(table.as_ref(), client)?;
+    let fit_dev = DeviceFit::new(&log_totals, client)?;
     let log_totals_f32: Vec<f32> = log_totals.iter().map(|&x| x as f32).collect();
     let log_totals_dev = GpuTensor::<f32>::from_slice(&log_totals_f32, vec![n_cells], client)?;
 
@@ -1042,7 +1162,15 @@ where
             }
         };
 
-        let rows = run_marginalise(&batch, &log_totals_dev, n_cells, &sweep, &weights, client)?;
+        let rows = run_marginalise(
+            &batch,
+            &log_totals_dev,
+            n_cells,
+            &sweep,
+            &weights,
+            &fit_dev,
+            client,
+        )?;
         let (lfc, eb) = rows.split_at(n * n_cells);
         let kept: Vec<bool> = (0..n)
             .into_par_iter()
