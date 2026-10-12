@@ -1,11 +1,13 @@
-//! The two device kernels and their per-cell helpers.
+//! The device kernels and their per-cell helpers.
 //!
 //! [`fn@sweep_grid_gpu`] is the first pass: one workgroup of whole planes per
 //! gene, running the whole variance grid with the offset solve inside the
-//! workgroup. [`fn@marginalise_gpu`]
-//! is the second pass: one thread per gene and cell, integrating over the bins
-//! the host kept. Everything is `f32`; see the [`crate::gpu`] module doc for
-//! where that costs precision and how the arithmetic is arranged around it.
+//! workgroup. The second pass is [`fn@marginalise_gpu`], one thread per
+//! evaluated cell integrating over the bins the host kept, then
+//! [`fn@fill_cells_gpu`] and [`fn@scatter_listed_gpu`], which interpolate the
+//! empty cells and write every cell out. Everything is `f32`; see the
+//! [`crate::gpu`] module doc for where that costs precision and how the
+//! arithmetic is arranged around it.
 
 // The `#[cube]` macro generates undocumented expansion items.
 #![allow(missing_docs)]
@@ -13,6 +15,7 @@
 use cubecl::prelude::*;
 
 use crate::model::empty_cells::{N_SUMS, PANEL_POINTS};
+use crate::model::gene::EMPTY_FIT_DEGREE;
 
 ////////////
 // Consts //
@@ -20,6 +23,9 @@ use crate::model::empty_cells::{N_SUMS, PANEL_POINTS};
 
 /// Totals one sweep reduces; see `sweep`.
 pub const N_TOTALS: u32 = 5;
+
+/// Nodes of the run's empty-cell fit; see `crate::model::gene::EMPTY_FIT_DEGREE`.
+pub const FIT_POINTS: u32 = EMPTY_FIT_DEGREE as u32 + 1;
 
 /// Most planes one gene's workgroup may hold, which also sizes the shared
 /// scratch for the cross-plane reduction: `N_TOTALS * MAX_PLANES_PER_GENE`
@@ -345,7 +351,7 @@ fn sweep<F: Float>(
     table_coeffs: &Tensor<F>,
     table_scalars: &Tensor<F>,
     n_panels: u32,
-    partials: &mut SharedMemory<F>,
+    partials: &mut Shared<[F]>,
     v: F,
     shift: F,
     tot: &mut Array<F>,
@@ -644,6 +650,34 @@ fn gaussian_variance<F: Float>(v: F, w: F, curvature: F) -> F {
     (v / one_plus) * (one + w * w / (one_plus * curvature))
 }
 
+/// The gene that owns position `x` of a ragged layout.
+///
+/// ### Params
+///
+/// * `offsets` - Start of each gene's range, ascending, length `n + 1`, with
+///   `offsets[0] = 0` and `x` below `offsets[n]`.
+/// * `n` - Genes.
+/// * `x` - The position.
+///
+/// ### Returns
+///
+/// The largest `g < n` with `offsets[g] <= x`, which skips genes whose range is
+/// empty.
+#[cube]
+fn owner(offsets: &Tensor<u32>, n: u32, x: u32) -> u32 {
+    let mut lo = 0u32;
+    let mut hi = n;
+    while hi - lo > 1u32 {
+        let mid = (lo + hi) / 2u32;
+        if offsets[mid as usize] <= x {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
 /////////////
 // Kernels //
 /////////////
@@ -683,6 +717,8 @@ fn gaussian_variance<F: Float>(v: F, w: F, curvature: F) -> F {
 ///   others do not; the host adds theirs in `f64`.
 /// * `status` - Per gene: `0` if every bin converged, else `1 +` the first bin
 ///   that did not. Bins after it are left unwritten.
+/// * `order` - The gene each cube runs, a permutation of the batch. The host
+///   puts the genes that walk the most cells first.
 /// * `n_genes` - Genes in the launch.
 /// * `n_cells` - Cells.
 /// * `n_bins` - Bins per gene.
@@ -690,7 +726,7 @@ fn gaussian_variance<F: Float>(v: F, w: F, curvature: F) -> F {
 ///
 /// ### Grid mapping
 ///
-/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> gene
+/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> slot; `order[slot]` -> gene
 /// * `UNIT_POS_X` -> lane, striding over the cells by `CUBE_DIM_X`
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
@@ -709,17 +745,20 @@ pub fn sweep_grid_gpu<F: Float + CubeElement>(
     bins: &Tensor<F>,
     out: &mut Tensor<F>,
     status: &mut Tensor<u32>,
+    order: &Tensor<u32>,
     n_genes: u32,
     n_cells: u32,
     n_bins: u32,
     cold_start: u32,
 ) {
-    let gene = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
-    if gene >= n_genes {
+    let slot = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
+    if slot >= n_genes {
         terminate!();
     }
+    let gene = order[slot as usize];
     let lead = UNIT_POS_X == 0u32;
-    let mut partials = SharedMemory::<F>::new((N_TOTALS * MAX_PLANES_PER_GENE) as usize);
+    let mut partials =
+        Shared::<[F]>::new_slice(comptime!((N_TOTALS * MAX_PLANES_PER_GENE) as usize));
     let zero = F::new(0.0_f32);
     let use_table = gene_scalars[(2u32 * n_genes + gene) as usize] > zero;
     let one = F::new(1.0_f32);
@@ -728,7 +767,7 @@ pub fn sweep_grid_gpu<F: Float + CubeElement>(
     let mut z = gene_scalars[(n_genes + gene) as usize];
     let mut tot = Array::<F>::new(N_TOTALS as usize);
     let mut tab = Array::<F>::new(N_TOTALS as usize);
-    let mut failed: u32 = 0u32;
+    let mut failed = 0u32;
 
     let mut b = 0u32;
     while b < n_bins {
@@ -893,39 +932,58 @@ pub fn sweep_grid_gpu<F: Float + CubeElement>(
     }
 }
 
-/// Second pass: integrate each cell's estimate over the kept bins.
+/// Second pass: integrate each evaluated cell's estimate over the kept bins.
 ///
 /// SI eq. 39 and 42, as in `crate::model::gene::marginalise`, with the spread
 /// of `d*_c` across bins accumulated by weighted Welford. Each bin's offset and
 /// `S_A` come from [`fn@sweep_grid_gpu`]'s output, still on the device, so no
-/// bin needs solving again. Cells are independent here: one thread per cell,
-/// no reduction and no barrier. A point-estimate rule is the same kernel over
-/// one bin of weight one, where the spread term vanishes.
+/// bin needs solving again. A point-estimate rule is the same kernel over one
+/// bin of weight one, where the spread term vanishes.
+///
+/// A fitted gene evaluates only its nonzero cells and one stand-in empty cell
+/// at each node of the run's empty-cell fit, as the CPU does: an empty cell's
+/// outputs depend on it only through `ln T_c`. [`fn@fill_cells_gpu`] then
+/// interpolates every cell and [`fn@scatter_listed_gpu`] puts the nonzero cells
+/// back. Any other gene evaluates its whole dense row. Entries are independent:
+/// one thread each, no reduction and no barrier.
 ///
 /// ### Params
 ///
-/// * `counts` - Dense counts, `[gene * n_cells + c]`.
+/// * `counts` - Dense counts, `[gene * n_cells + c]`, read for genes that are
+///   not fitted.
+/// * `list_offsets`, `list_cells`, `list_counts` - The first pass's cell lists.
 /// * `log_totals` - `ln T_c`, length `n_cells`.
+/// * `fit_nodes` - The empty-cell fit's nodes in `ln T`, [`FIT_POINTS`] long.
+/// * `fitted` - Per gene, `1` if its empty cells are interpolated.
+/// * `compact_offsets` - Start of each gene's entries, length `n_genes + 1`: a
+///   fitted gene's listed cells then the nodes, any other gene's whole row.
+/// * `block_offsets` - Start of each gene's cubes, length `n_genes + 1`.
 /// * `gene_scalars` - As for [`fn@sweep_grid_gpu`].
 /// * `bins` - As for [`fn@sweep_grid_gpu`].
 /// * `sweep_out` - [`fn@sweep_grid_gpu`]'s output.
 /// * `weights` - `W_b`, `[gene * n_bins + b]`; zero for a bin the host dropped.
-/// * `out` - `[r * n_genes * n_cells + gene * n_cells + c]`: `d_c`, then `e_c`.
+/// * `out` - `[r * n_entries + compact_offsets[gene] + j]`: `d_c`, then `e_c`.
 /// * `n_genes` - Genes in the launch.
 /// * `n_cells` - Cells.
 /// * `n_bins` - Bins per gene.
-/// * `blocks_per_gene` - Cubes covering one gene's cells.
 ///
 /// ### Grid mapping
 ///
-/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> block; `block / blocks_per_gene`
-///   -> gene
-/// * `(block % blocks_per_gene) * CUBE_DIM_X + UNIT_POS_X` -> cell
+/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> block; its `owner` in
+///   `block_offsets` -> gene
+/// * `(block - block_offsets[gene]) * CUBE_DIM_X + UNIT_POS_X` -> entry
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 pub fn marginalise_gpu<F: Float + CubeElement>(
     counts: &Tensor<F>,
+    list_offsets: &Tensor<u32>,
+    list_cells: &Tensor<u32>,
+    list_counts: &Tensor<F>,
     log_totals: &Tensor<F>,
+    fit_nodes: &Tensor<F>,
+    fitted: &Tensor<u32>,
+    compact_offsets: &Tensor<u32>,
+    block_offsets: &Tensor<u32>,
     gene_scalars: &Tensor<F>,
     bins: &Tensor<F>,
     sweep_out: &Tensor<F>,
@@ -934,18 +992,35 @@ pub fn marginalise_gpu<F: Float + CubeElement>(
     n_genes: u32,
     n_cells: u32,
     n_bins: u32,
-    blocks_per_gene: u32,
 ) {
     let block = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
-    let gene = block / blocks_per_gene;
-    let c = (block % blocks_per_gene) * CUBE_DIM_X + UNIT_POS_X;
-    if gene >= n_genes || c >= n_cells {
+    if block >= block_offsets[n_genes as usize] {
+        terminate!();
+    }
+    let gene = owner(block_offsets, n_genes, block);
+    let j = (block - block_offsets[gene as usize]) * CUBE_DIM_X + UNIT_POS_X;
+    let start = compact_offsets[gene as usize];
+    if j >= compact_offsets[(gene + 1u32) as usize] - start {
         terminate!();
     }
     let zero = F::new(0.0_f32);
 
-    let k = counts[(gene * n_cells + c) as usize];
-    let lt = log_totals[c as usize];
+    // An entry is never past the last cell: a gene is fitted only when its
+    // listed cells and the nodes together number fewer than the cells.
+    let mut k = zero;
+    let mut lt = log_totals[j as usize];
+    if fitted[gene as usize] == 1u32 {
+        let first = list_offsets[gene as usize];
+        let listed = list_offsets[(gene + 1u32) as usize] - first;
+        if j < listed {
+            k = list_counts[(first + j) as usize];
+            lt = log_totals[list_cells[(first + j) as usize] as usize];
+        } else {
+            lt = fit_nodes[(j - listed) as usize];
+        }
+    } else {
+        k = counts[(gene * n_cells + j) as usize];
+    }
     let s = gene_scalars[gene as usize];
     let stride = n_genes * n_bins;
 
@@ -985,6 +1060,154 @@ pub fn marginalise_gpu<F: Float + CubeElement>(
         b += 1u32;
     }
 
-    out[(gene * n_cells + c) as usize] = mean_d;
-    out[((n_genes + gene) * n_cells + c) as usize] = F::sqrt(mean_var + m2_d / running);
+    let n_entries = compact_offsets[n_genes as usize];
+    out[(start + j) as usize] = mean_d;
+    out[(n_entries + start + j) as usize] = F::sqrt(mean_var + m2_d / running);
+}
+
+/// Write every cell's `d_c` and `e_c` from [`fn@marginalise_gpu`]'s entries.
+///
+/// A fitted gene's cells all take the interpolant through its node entries, as
+/// `crate::model::gene::write_cells`; [`fn@scatter_listed_gpu`] then overwrites
+/// the nonzero ones. Each cube forms the gene's two series of coefficients in
+/// shared memory first, `2 * FIT_POINTS^2` multiply-adds. Any other gene's row
+/// is copied.
+///
+/// ### Params
+///
+/// * `entries` - [`fn@marginalise_gpu`]'s output.
+/// * `list_offsets` - The first pass's list offsets.
+/// * `fitted` - Per gene, `1` if its empty cells are interpolated.
+/// * `compact_offsets` - As for [`fn@marginalise_gpu`].
+/// * `log_totals` - `ln T_c`, length `n_cells`.
+/// * `fit_transform` - The fit's transform, `[k * FIT_POINTS + j]`.
+/// * `fit_map` - `2 / (b - a)` and `(a + b) / (b - a)`, which map `ln T` onto
+///   the fit's `[-1, 1]`.
+/// * `out` - `[r * n_genes * n_cells + gene * n_cells + c]`: `d_c`, then `e_c`.
+/// * `n_genes` - Genes in the launch.
+/// * `n_cells` - Cells.
+/// * `blocks_per_gene` - Cubes covering one gene's cells.
+///
+/// ### Grid mapping
+///
+/// * `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` -> block; `block / blocks_per_gene`
+///   -> gene
+/// * `(block % blocks_per_gene) * CUBE_DIM_X + UNIT_POS_X` -> cell
+#[cube(launch_unchecked)]
+#[allow(clippy::too_many_arguments)]
+pub fn fill_cells_gpu<F: Float + CubeElement>(
+    entries: &Tensor<F>,
+    list_offsets: &Tensor<u32>,
+    fitted: &Tensor<u32>,
+    compact_offsets: &Tensor<u32>,
+    log_totals: &Tensor<F>,
+    fit_transform: &Tensor<F>,
+    fit_map: &Tensor<F>,
+    out: &mut Tensor<F>,
+    n_genes: u32,
+    n_cells: u32,
+    blocks_per_gene: u32,
+) {
+    let block = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
+    let gene = block / blocks_per_gene;
+    // Uniform over the cube, so the barrier below stays in uniform control flow.
+    if gene >= n_genes {
+        terminate!();
+    }
+    let c = (block % blocks_per_gene) * CUBE_DIM_X + UNIT_POS_X;
+    let mut coeffs = Shared::<[F]>::new_slice(comptime!(2 * FIT_POINTS as usize));
+    let n_entries = compact_offsets[n_genes as usize];
+    let start = compact_offsets[gene as usize];
+    let row = gene * n_cells + c;
+
+    if fitted[gene as usize] == 1u32 {
+        let listed = list_offsets[(gene + 1u32) as usize] - list_offsets[gene as usize];
+        let nodes = start + listed;
+        let mut q = UNIT_POS_X;
+        while q < 2u32 * FIT_POINTS {
+            let series = q / FIT_POINTS;
+            let kk = q % FIT_POINTS;
+            let mut acc = F::new(0.0_f32);
+            let mut jj = 0u32;
+            while jj < FIT_POINTS {
+                acc += fit_transform[(kk * FIT_POINTS + jj) as usize]
+                    * entries[(series * n_entries + nodes + jj) as usize];
+                jj += 1u32;
+            }
+            coeffs[q as usize] = acc;
+            q += CUBE_DIM_X;
+        }
+        sync_cube();
+
+        if c < n_cells {
+            let t = log_totals[c as usize] * fit_map[0] - fit_map[1];
+            let two_t = F::new(2.0_f32) * t;
+            let mut series = 0u32;
+            while series < 2u32 {
+                let base = series * FIT_POINTS;
+                // Clenshaw's recurrence, as `crate::utils::chebyshev::clenshaw`.
+                let mut b1 = F::new(0.0_f32);
+                let mut b2 = F::new(0.0_f32);
+                let mut i = 1u32;
+                while i < FIT_POINTS {
+                    let b0 = two_t * b1 - b2 + coeffs[(base + FIT_POINTS - i) as usize];
+                    b2 = b1;
+                    b1 = b0;
+                    i += 1u32;
+                }
+                out[(series * n_genes * n_cells + row) as usize] =
+                    t * b1 - b2 + coeffs[base as usize];
+                series += 1u32;
+            }
+        }
+    } else if c < n_cells {
+        out[row as usize] = entries[(start + c) as usize];
+        out[(n_genes * n_cells + row) as usize] = entries[(n_entries + start + c) as usize];
+    }
+}
+
+/// Put a fitted gene's nonzero cells back over the interpolant.
+///
+/// Runs after [`fn@fill_cells_gpu`] on the same stream.
+///
+/// ### Params
+///
+/// * `entries` - [`fn@marginalise_gpu`]'s output.
+/// * `list_offsets` - The first pass's list offsets.
+/// * `list_cells` - Cell index of each listed cell.
+/// * `fitted` - Per gene, `1` if its empty cells are interpolated.
+/// * `compact_offsets` - As for [`fn@marginalise_gpu`].
+/// * `out` - As for [`fn@fill_cells_gpu`].
+/// * `n_genes` - Genes in the launch.
+/// * `n_cells` - Cells.
+/// * `n_listed` - Listed cells over all genes.
+///
+/// ### Grid mapping
+///
+/// * `(CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * CUBE_DIM_X + UNIT_POS_X` ->
+///   listed cell; its `owner` in `list_offsets` -> gene
+#[cube(launch_unchecked)]
+#[allow(clippy::too_many_arguments)]
+pub fn scatter_listed_gpu<F: Float + CubeElement>(
+    entries: &Tensor<F>,
+    list_offsets: &Tensor<u32>,
+    list_cells: &Tensor<u32>,
+    fitted: &Tensor<u32>,
+    compact_offsets: &Tensor<u32>,
+    out: &mut Tensor<F>,
+    n_genes: u32,
+    n_cells: u32,
+    n_listed: u32,
+) {
+    let i = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * CUBE_DIM_X + UNIT_POS_X;
+    if i < n_listed {
+        let gene = owner(list_offsets, n_genes, i);
+        if fitted[gene as usize] == 1u32 {
+            let entry = compact_offsets[gene as usize] + i - list_offsets[gene as usize];
+            let n_entries = compact_offsets[n_genes as usize];
+            let row = gene * n_cells + list_cells[i as usize];
+            out[row as usize] = entries[entry as usize];
+            out[(n_genes * n_cells + row) as usize] = entries[(n_entries + entry) as usize];
+        }
+    }
 }

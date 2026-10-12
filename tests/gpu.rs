@@ -5,8 +5,8 @@
 //! of an error bar (`DEFAULT_VARIANCE_BINS`), so a log fold change within that
 //! of the CPU's is as right as the CPU's.
 
-use cubecl::prelude::*;
 use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+use cubecl_utils_rs::prelude::Runtime;
 use sanity_sc_rs::config::{SanityParams, VarianceRule};
 use sanity_sc_rs::gpu::sanity_gpu;
 use sanity_sc_rs::sanity;
@@ -48,10 +48,10 @@ fn assert_parity(rule: VarianceRule) {
         variance_rule: rule,
         ..SanityParams::default()
     };
-    let client = WgpuRuntime::client(&WgpuDevice::default());
+    let client = <WgpuRuntime>::client(&WgpuDevice::default());
     let cpu = sanity::<f64>(&sim.counts, &sim.cell_totals, Some(params)).expect("CPU runs");
-    let gpu = sanity_gpu::<f64, WgpuRuntime>(&sim.counts, &sim.cell_totals, Some(params), &client)
-        .expect("GPU runs");
+    let gpu =
+        sanity_gpu::<f64>(&sim.counts, &sim.cell_totals, Some(params), &client).expect("GPU runs");
 
     // A launch that silently did no work leaves zeros, which no error bar is.
     assert!(
@@ -111,14 +111,12 @@ fn test_gpu_fixed_matches_cpu() {
 #[test]
 fn test_gpu_rejects_what_the_cpu_rejects() {
     let sim = fixture();
-    let client = WgpuRuntime::client(&WgpuDevice::default());
+    let client = <WgpuRuntime>::client(&WgpuDevice::default());
     let short = &sim.cell_totals[1..];
-    assert!(sanity_gpu::<f32, WgpuRuntime>(&sim.counts, short, None, &client).is_err());
+    assert!(sanity_gpu::<f32>(&sim.counts, short, None, &client).is_err());
     let bad = SanityParams {
         variance_rule: VarianceRule::Fixed(-1.0),
         ..SanityParams::default()
     };
-    assert!(
-        sanity_gpu::<f32, WgpuRuntime>(&sim.counts, &sim.cell_totals, Some(bad), &client).is_err()
-    );
+    assert!(sanity_gpu::<f32>(&sim.counts, &sim.cell_totals, Some(bad), &client).is_err());
 }

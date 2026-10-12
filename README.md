@@ -1,3 +1,8 @@
+[![CI](https://github.com/GregorLueg/sanity-sc-rs/actions/workflows/test.yml/badge.svg)](https://github.com/GregorLueg/sanity-sc-rs/actions/workflows/test.yml)
+[![Crates.io](https://img.shields.io/crates/v/sanity-sc-rs.svg)](https://crates.io/crates/sanity-sc-rs)
+[![docs.rs](https://img.shields.io/docsrs/sanity-sc-rs)](https://docs.rs/sanity-sc-rs)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 # sanity-sc-rs
 
 Bayesian inference of gene expression states from single cell UMI counts. A
@@ -18,6 +23,47 @@ Bonsai.
 
 Feed it raw counts only. Anything already log-normalised is the wrong input: the
 whole point of the method is to model the Poisson sampling in the raw counts.
+Changes live in the [CHANGELOG](https://github.com/GregorLueg/sanity-sc-rs/blob/main/CHANGELOG.md).
+
+## Installation
+
+```toml
+[dependencies]
+sanity-sc-rs = "0.4"
+```
+
+Want the GPU path? Turn on `gpu` and pull in cubecl and cubecl-utils-rs
+yourself to build the client:
+
+```toml
+[dependencies]
+sanity-sc-rs = { version = "0.4", features = ["gpu"] }
+cubecl = { version = "0.11", features = ["wgpu"] }
+cubecl-utils-rs = "0.2"
+```
+
+## Performance
+
+M1 Max, `Marginalise`, simulated counts at 8 to 9% density. Against the
+reference Sanity binary, whole process on 8 threads, text I/O included:
+
+| genes x cells | reference | sanity-sc-rs | speedup |
+|---|---|---|---|
+| 490 x 2000 | 10.4 s | 0.59 s | 18x |
+| 1998 x 20000 | 415 s | 22.3 s | 19x |
+
+The outputs agree to the six decimals the reference writes. A third of our
+22.3 s is formatting 40 million numbers as text.
+
+CPU against GPU, wall clock of the call only, CPU on all 10 cores:
+
+| genes x cells | `sanity` | `sanity_gpu` | speedup |
+|---|---|---|---|
+| 1998 x 20000 | 13.1 s | 0.57 s | 23x |
+| 500 x 200000 | 57.8 s | 2.40 s | 24x |
+
+Every variance rule, peak memory and the GPU's error against the CPU are in
+`docs/BENCHMARKS.md`.
 
 ## Usage
 
@@ -50,7 +96,7 @@ let kept = sanity_select::<f32, _>(&counts, &cell_totals, None, |g| g.variance >
 
 Storage is `f32` or `f64`. Every reduction accumulates in `f64` either way.
 
-Want to see where more or less details? Set the verbosity.
+Want more or less detail? Set the verbosity.
 
 ```rust
 use sanity_sc_rs::config::Verbosity;
@@ -103,22 +149,22 @@ inverts the zero-mean prior on `d_c`, and adding `m` back breaks it.
 
 ### GPU
 
-Behind the `gpu` feature: CubeCL on wgpu, so Metal, Vulkan or DX12. Same
+Behind the `gpu` feature: CubeCL 0.11 on wgpu, so Metal, Vulkan or DX12. Same
 inference, same output struct.
 
 ```rust
-use cubecl::prelude::*;
 use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+use cubecl_utils_rs::prelude::Runtime;
 use sanity_sc_rs::gpu::sanity_gpu;
 
-let client = WgpuRuntime::client(&WgpuDevice::default());
-let out = sanity_gpu::<f32, WgpuRuntime>(&counts, &cell_totals, None, &client)?;
+let client = <WgpuRuntime>::client(&WgpuDevice::default());
+let out = sanity_gpu::<f32>(&counts, &cell_totals, None, &client)?;
 ```
 
-On an M1 Max against all ten CPU cores, `Marginalise` runs 18x faster at 2000
-genes by 20000 cells and 27x at 500 by 200000; see `docs/BENCHMARKS.md`. The
-ratios dropped from the 78x and 60x of v0.2 because the CPU got 5x to 8x faster,
-not because the GPU got slower. It got faster too.
+On Apple the kernels go through cubecl's WGSL and wgpu's translation to Metal,
+not cubecl's native `metal` feature. That costs 20 to 30% on these kernels
+under cubecl 0.11, but cargo unifies features across a build, so turning it on
+here would flip every crate sharing cubecl onto Metal source. Not worth it.
 
 wgpu has no `f64`, so the device works in `f32`. The per-cell maths is
 rearranged so no sum ever cancels, the offset is solved relative to an `f64`
