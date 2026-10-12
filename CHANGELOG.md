@@ -14,20 +14,14 @@
   every `break` and `return` into a flag variable, and both kernels sit in
   loops that break early. cubecl's `metal` feature dodges it on Apple but is
   not used: cargo unifies features, so it would switch every crate sharing
-  cubecl in a build onto Metal source, and it made ann-search-rs's k-means
-  4.4x slower.
+  cubecl in a build onto Metal source and some of the kernels are actually
+  slower with cubecl 0.11.
 * The GPU second pass no longer solves every empty cell in every bin. Like the
   CPU, it evaluates a gene's nonzero cells and the 49 nodes of the empty-cell
-  fit in `ln T`, then interpolates. That kernel went from 229 ms to about
-  10 ms at 2000 genes by 20000 cells.
+  fit in `ln T`, then interpolates.
 * The GPU first pass dispatches the genes that walk the most cells first, so
-  the slowest ones no longer start last: 240 to 186 ms at 20000 cells, 1.22 to
-  0.86 s at 200000.
+  the slowest ones no longer start last.
 * The GPU output is copied out in parallel.
-* All together, `Marginalise` on an M1 Max: 0.82 s to 0.57 s at 2000 genes by
-  20000 cells. At 500 by 200000 it stays where it was, 2.36 s to 2.40 s: the
-  gains above and the slower WGSL cancel out. Against all ten CPU cores that's
-  23x and 24x, against 18x and 27x in v0.3.0.
 
 ### Numerics
 

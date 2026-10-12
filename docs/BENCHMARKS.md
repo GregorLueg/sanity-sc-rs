@@ -91,29 +91,3 @@ errors exactly. Still a third of the way to the 1% line.
 `MaxPosterior` re-solves bins the device cannot separate from the best in `f64`
 on the CPU. Those re-solves run the same sparse path as `sanity`, so they cost
 little, and the rule lands on the same bin as the CPU.
-
-## GPU: why not cubecl's `metal` feature
-
-The same code with and without cubecl's `metal` feature, `Marginalise`, GPU
-only, best of three after a warm-up, 2026-10-12. Without the feature, wgpu
-translates cubecl's WGSL to Metal itself; with it, cubecl writes the Metal
-source. Same answers either way.
-
-| shape | WGSL | Metal source |
-|---|---|---|
-| 1998 genes by 20000 cells | 0.48 s | 0.30 s |
-| 500 genes by 200000 cells | 2.12 s | 1.30 s |
-
-So why leave it off? Cargo unifies features. One crate turning `metal` on
-switches every crate sharing cubecl in that build onto Metal source, whether it
-asked or not, and it is not a win everywhere: ann-search-rs's k-means
-assignment kernel ran 4.4x slower with it. One switch for the whole ecosystem
-beats a per-crate guess.
-
-The gap itself is cubecl 0.11. It lowers every `break` and `return` into a flag
-variable that guards the rest of the block, and wgpu's translation of that to
-Metal runs slower. Feeding cubecl 0.10's WGSL for the same two kernels into the
-0.11 runtime gives back 0.10's speed (first pass 195 to 145 ms, second pass 38.6
-to 32.4 ms at 500 genes by 20000 cells). Rewriting just the flags back into
-`break` and `return` by hand recovers all of the second pass and two thirds of
-the first.
