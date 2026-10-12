@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.4.0
+
+### Breaking
+
+* cubecl 0.11 and cubecl-utils-rs 0.2.0. `sanity_gpu` and `sanity_gpu_select`
+  lose their runtime generic and take cubecl's `&Client`: call
+  `sanity_gpu::<f32>(&counts, &totals, None, &client)`.
+
+### Performance
+
+* On Apple the GPU kernels compile straight to Metal source (cubecl's `metal`
+  feature) instead of WGSL translated by wgpu. 1.6x on its own; other
+  platforms are unaffected.
+* The GPU second pass no longer solves every empty cell in every bin. Like the
+  CPU, it evaluates a gene's nonzero cells and the 49 nodes of the empty-cell
+  fit in `ln T`, then interpolates. That kernel went from 229 ms to about
+  10 ms at 2000 genes by 20000 cells.
+* The GPU first pass dispatches the genes that walk the most cells first, so
+  the slowest ones no longer start last: 240 to 186 ms at 20000 cells, 1.22 to
+  0.86 s at 200000.
+* The GPU output is copied out in parallel.
+* All together, `Marginalise` on an M1 Max: 0.82 s to 0.37 s at 2000 genes by
+  20000 cells, 2.36 s to 1.64 s at 500 by 200000. Against all ten CPU cores
+  that's 35x and 36x, up from 18x and 27x.
+
+### Numerics
+
+* cubecl 0.11 fuses multiply-adds into `fma` and can't be told not to. The
+  worst GPU log fold change at 200000 cells moves from `1.9e-3` to `3.1e-3` of
+  an error bar against the CPU, still well inside the 1% the grid resolves.
+
 ## v0.3.0
 
 ### Performance

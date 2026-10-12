@@ -103,22 +103,22 @@ inverts the zero-mean prior on `d_c`, and adding `m` back breaks it.
 
 ### GPU
 
-Behind the `gpu` feature: CubeCL on wgpu, so Metal, Vulkan or DX12. Same
-inference, same output struct.
+Behind the `gpu` feature: CubeCL 0.11 on wgpu, so Metal, Vulkan or DX12. Same
+inference, same output struct. On Apple the kernels compile straight to Metal
+source rather than going through WGSL, which is 1.6x faster on this workload.
 
 ```rust
-use cubecl::prelude::*;
 use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+use cubecl_utils_rs::prelude::Runtime;
 use sanity_sc_rs::gpu::sanity_gpu;
 
-let client = WgpuRuntime::client(&WgpuDevice::default());
-let out = sanity_gpu::<f32, WgpuRuntime>(&counts, &cell_totals, None, &client)?;
+let client = <WgpuRuntime>::client(&WgpuDevice::default());
+let out = sanity_gpu::<f32>(&counts, &cell_totals, None, &client)?;
 ```
 
-On an M1 Max against all ten CPU cores, `Marginalise` runs 18x faster at 2000
-genes by 20000 cells and 27x at 500 by 200000; see `docs/BENCHMARKS.md`. The
-ratios dropped from the 78x and 60x of v0.2 because the CPU got 5x to 8x faster,
-not because the GPU got slower. It got faster too.
+On an M1 Max against all ten CPU cores, `Marginalise` runs 35x faster at 2000
+genes by 20000 cells and 36x at 500 by 200000; see `docs/BENCHMARKS.md`. That's
+up from 18x and 27x in v0.3, all of it on the GPU side.
 
 wgpu has no `f64`, so the device works in `f32`. The per-cell maths is
 rearranged so no sum ever cancels, the offset is solved relative to an `f64`
