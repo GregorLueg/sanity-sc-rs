@@ -753,7 +753,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde",
- "spin 0.12.3",
+ "spin",
  "tynm",
  "xxhash-rust",
 ]
@@ -830,7 +830,7 @@ dependencies = [
  "libc",
  "log",
  "pliron",
- "spin 0.12.3",
+ "spin",
  "sysinfo",
  "winapi",
 ]
@@ -884,7 +884,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
- "spin 0.12.3",
+ "spin",
  "toml",
  "turso",
  "wasm-bindgen",
@@ -952,7 +952,7 @@ dependencies = [
  "rustc_apfloat",
  "serde",
  "smallvec",
- "spin 0.12.3",
+ "spin",
  "thiserror 2.0.20",
  "variadics_please",
 ]
@@ -1144,13 +1144,15 @@ dependencies = [
  "num-traits",
  "paste",
  "serde",
- "spin 0.12.3",
+ "spin",
  "variadics_please",
 ]
 
 [[package]]
 name = "cubecl-utils-rs"
-version = "0.1.0"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "abc1438e05cc10fa56239de4b50903672e35cd16f7cc9ed4190226f270383215"
 dependencies = [
  "cubecl",
  "cubecl-runtime",
@@ -2931,7 +2933,7 @@ dependencies = [
  "rustc_apfloat",
  "slotmap",
  "smallvec",
- "spin 0.10.1",
+ "spin",
  "thiserror 2.0.20",
  "utf8-chars",
 ]
@@ -3712,15 +3714,6 @@ name = "softaes"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4fdfe13e1c42e45f497416afb8dc4e783bf0e25b7be9077c1c77c5fb14cb998"
-
-[[package]]
-name = "spin"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "023a211cb3138dbc438680b32560ad89f699977624c9f8dbb95a47d5b4c07dd3"
-dependencies = [
- "lock_api",
-]
 
 [[package]]
 name = "spin"
